@@ -1,0 +1,20 @@
+[Unit]
+Description=Telegram list bot for active tenant-1 Alertmanager alerts
+After=network-online.target alertmanager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alert-list-bot
+Group=alert-list-bot
+EnvironmentFile=/etc/alert-list-bot/alert-list-bot.env
+ExecStart=/usr/local/bin/alert-list-bot
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target
