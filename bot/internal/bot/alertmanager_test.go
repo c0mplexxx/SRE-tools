@@ -385,6 +385,7 @@ func TestAlertmanagerClientCoverageInstance(t *testing.T) {
 						{"name": "rule_swap_probe", "type": "alerting", "query": "node_memory_SwapTotal_bytes > 0", "labels": {"tenant": "1"}},
 						{"name": "rule_proxy_probe", "type": "alerting", "query": "haproxy_backend_status == 0", "labels": {"tenant": "1"}},
 						{"name": "rule_network_probe", "type": "alerting", "query": "node_network_up == 0", "labels": {"tenant": "1"}},
+						{"name": "rule_scoped_network_probe", "type": "alerting", "query": "rate(node_ethtool_received_errors{job=\"node_exporter\",instance=~\"edge-.*\"}[1m]) > 0", "labels": {"tenant": "1"}},
 						{"name": "rule_placeholder", "type": "alerting", "query": "vector(1)", "labels": {"tenant": "1"}}
 					]
 				}]
@@ -431,7 +432,7 @@ func TestAlertmanagerClientCoverageInstance(t *testing.T) {
 			t.Fatalf("coverage query missing %q in:\n%s", wantQueryPart, joined)
 		}
 	}
-	for _, leaked := range []string{"rule_static_other", "rule_notify_static", "rule_recording", "rule_load_probe", "rule_swap_probe", "rule_placeholder"} {
+	for _, leaked := range []string{"rule_static_other", "rule_notify_static", "rule_recording", "rule_load_probe", "rule_swap_probe", "rule_scoped_network_probe", "rule_placeholder"} {
 		if strings.Contains(strings.Join(coverage.Alertnames, ","), leaked) {
 			t.Fatalf("coverage leaked %s: %#v", leaked, coverage.Alertnames)
 		}
@@ -467,6 +468,68 @@ func TestAlertmanagerClientCoverageNetworkUsesSourceMetricProbe(t *testing.T) {
 	}
 	if got := strings.Join(coverage.Alertnames, ","); got != "rule_network_probe" {
 		t.Fatalf("unexpected network coverage: %q", got)
+	}
+}
+
+func TestRuleQueryAllowsInstance(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		query    string
+		instance string
+		want     bool
+	}{
+		{
+			name:     "no instance matcher",
+			query:    `up{job="node_exporter"} == 0`,
+			instance: "node-01",
+			want:     true,
+		},
+		{
+			name:     "exact match",
+			query:    `up{instance="node-01"} == 0`,
+			instance: "node-01",
+			want:     true,
+		},
+		{
+			name:     "exact mismatch",
+			query:    `up{instance="node-01"} == 0`,
+			instance: "node-02",
+			want:     false,
+		},
+		{
+			name:     "regex match",
+			query:    `rate(node_ethtool_received_errors{instance=~"edge-.*"}[1m]) > 0`,
+			instance: "edge-01",
+			want:     true,
+		},
+		{
+			name:     "regex mismatch",
+			query:    `rate(node_ethtool_received_errors{instance=~"edge-.*"}[1m]) > 0`,
+			instance: "vminsert-02",
+			want:     false,
+		},
+		{
+			name:     "negative exact rejects",
+			query:    `up{instance!="node-01"} == 0`,
+			instance: "node-01",
+			want:     false,
+		},
+		{
+			name:     "negative regex rejects",
+			query:    `up{instance!~"node-.*"} == 0`,
+			instance: "node-01",
+			want:     false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ruleQueryAllowsInstance(tt.query, tt.instance); got != tt.want {
+				t.Fatalf("ruleQueryAllowsInstance(%q, %q)=%v want %v", tt.query, tt.instance, got, tt.want)
+			}
+		})
 	}
 }
 

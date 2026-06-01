@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +30,8 @@ type vmalertRule struct {
 	Query  string            `json:"query"`
 	Labels map[string]string `json:"labels"`
 }
+
+var instanceMatcherPattern = regexp.MustCompile(`\binstance\s*(=~|!~|!=|=)\s*("(?:\\.|[^"\\])*")`)
 
 func (c *AlertmanagerClient) CoverageInstance(ctx context.Context, tenant, instance string) (InstanceCoverage, error) {
 	tenant = strings.TrimSpace(tenant)
@@ -134,6 +137,10 @@ func (c *AlertmanagerClient) fetchVmalertRules(ctx context.Context, baseURL stri
 }
 
 func (c *AlertmanagerClient) ruleCoveredBySourceMetric(ctx context.Context, metricsURL, instance string, rule vmalertRule, cache map[string]bool) (bool, error) {
+	if !ruleQueryAllowsInstance(rule.Query, instance) {
+		return false, nil
+	}
+
 	query := strings.ToLower(rule.Query)
 	selector := strconv.Quote(instance)
 
@@ -170,6 +177,56 @@ func (c *AlertmanagerClient) ruleCoveredBySourceMetric(ctx context.Context, metr
 	default:
 		return false, nil
 	}
+}
+
+func ruleQueryAllowsInstance(query, instance string) bool {
+	matches := instanceMatcherPattern.FindAllStringSubmatch(query, -1)
+	if len(matches) == 0 {
+		return true
+	}
+
+	hasPositiveMatcher := false
+	positiveMatched := false
+	for _, match := range matches {
+		if len(match) != 3 {
+			continue
+		}
+		operator := match[1]
+		value, err := strconv.Unquote(match[2])
+		if err != nil {
+			return false
+		}
+
+		switch operator {
+		case "=":
+			hasPositiveMatcher = true
+			if instance == value {
+				positiveMatched = true
+			}
+		case "=~":
+			hasPositiveMatcher = true
+			matched, err := regexp.MatchString(value, instance)
+			if err != nil {
+				return false
+			}
+			if matched {
+				positiveMatched = true
+			}
+		case "!=":
+			if instance == value {
+				return false
+			}
+		case "!~":
+			matched, err := regexp.MatchString(value, instance)
+			if err != nil {
+				return false
+			}
+			if matched {
+				return false
+			}
+		}
+	}
+	return !hasPositiveMatcher || positiveMatched
 }
 
 func (c *AlertmanagerClient) hasAllSourceSeries(ctx context.Context, baseURL string, cache map[string]bool, queries ...string) (bool, error) {
