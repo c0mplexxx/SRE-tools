@@ -27,6 +27,7 @@ func main() {
 		Alerts: &bot.AlertmanagerClient{
 			BaseURL:         cfg.AlertmanagerURL,
 			MetricsBaseURLs: cfg.MetricsURLs,
+			VmalertBaseURLs: cfg.VmalertURLs,
 			Client:          client,
 		},
 		Telegram: &bot.TelegramClient{
@@ -54,6 +55,7 @@ func main() {
 type config struct {
 	AlertmanagerURL    string
 	MetricsURLs        map[string]string
+	VmalertURLs        map[string]string
 	TelegramAPIBaseURL string
 	TelegramBotToken   string
 	AllowedChatIDs     map[int64]struct{}
@@ -69,10 +71,12 @@ func readConfig() (config, error) {
 	var allowedCSV string
 	var metricsTenant0 string
 	var metricsTenant1 string
+	var vmalertTenant1 string
 
 	flag.StringVar(&cfg.AlertmanagerURL, "alertmanager-url", envString("ALERTMANAGER_URL", "http://127.0.0.1:9093"), "Alertmanager base URL")
 	flag.StringVar(&metricsTenant0, "metrics-url-tenant-0", os.Getenv("METRICS_URL_TENANT_0"), "Prometheus/VictoriaMetrics base URL for tenant 0 commands")
-	flag.StringVar(&metricsTenant1, "metrics-url-tenant-1", envString("METRICS_URL_TENANT_1", os.Getenv("METRICS_URL")), "Prometheus/VictoriaMetrics base URL for tenant 1 /check")
+	flag.StringVar(&metricsTenant1, "metrics-url-tenant-1", envString("METRICS_URL_TENANT_1", os.Getenv("METRICS_URL")), "Prometheus/VictoriaMetrics base URL for tenant 1 /check and /coverage")
+	flag.StringVar(&vmalertTenant1, "vmalert-url-tenant-1", envString("VMALERT_URL_TENANT_1", "http://127.0.0.1:8881"), "vmalert base URL for tenant 1 /coverage")
 	flag.StringVar(&cfg.TelegramAPIBaseURL, "telegram-api-base-url", envString("TELEGRAM_API_BASE_URL", "https://api.telegram.org"), "Telegram Bot API base URL")
 	flag.StringVar(&cfg.TelegramBotToken, "telegram-bot-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram bot token")
 	flag.StringVar(&allowedCSV, "telegram-allowed-chat-ids", os.Getenv("TELEGRAM_ALLOWED_CHAT_IDS"), "comma-separated Telegram chat IDs")
@@ -110,6 +114,10 @@ func readConfig() (config, error) {
 	}
 	if metricsTenant1 != "" {
 		cfg.MetricsURLs[bot.TenantOne] = metricsTenant1
+	}
+	cfg.VmalertURLs = map[string]string{}
+	if vmalertTenant1 != "" {
+		cfg.VmalertURLs[bot.TenantOne] = vmalertTenant1
 	}
 	return cfg, nil
 }

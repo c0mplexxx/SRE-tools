@@ -42,6 +42,12 @@ type InstanceCheck struct {
 	NetworkTransmit  []MetricValue
 }
 
+type InstanceCoverage struct {
+	Tenant     string
+	Instance   string
+	Alertnames []string
+}
+
 type MetricValue struct {
 	Name  string
 	Value float64

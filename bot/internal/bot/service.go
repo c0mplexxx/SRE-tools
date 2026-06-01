@@ -98,6 +98,8 @@ func (s *Service) HandleUpdate(ctx context.Context, update Update) error {
 		return s.replySilences(ctx, chatID)
 	case "/check":
 		return s.replyCheck(ctx, chatID, fields)
+	case "/coverage":
+		return s.replyCoverage(ctx, chatID, fields)
 	case "/help":
 		if len(fields) != 1 {
 			return nil
@@ -174,6 +176,18 @@ func (s *Service) replyCheck(ctx context.Context, chatID int64, fields []string)
 		return s.Telegram.SendMessage(ctx, chatID, "Could not fetch instance metrics right now.")
 	}
 	return s.Telegram.SendMessage(ctx, chatID, RenderInstanceCheckMessage(check))
+}
+
+func (s *Service) replyCoverage(ctx context.Context, chatID int64, fields []string) error {
+	if len(fields) != 2 {
+		return s.Telegram.SendMessage(ctx, chatID, "Usage: <code>/coverage instance</code>\nExample: <code>/coverage node-01</code>")
+	}
+	coverage, err := s.Alerts.CoverageInstance(ctx, TenantOne, fields[1])
+	if err != nil {
+		s.logger().Printf("coverage check failed for chat %d instance %s: %v", chatID, fields[1], err)
+		return s.Telegram.SendMessage(ctx, chatID, "Could not fetch instance alert coverage right now.")
+	}
+	return s.Telegram.SendMessage(ctx, chatID, RenderInstanceCoverageMessage(coverage))
 }
 
 func (s *Service) replyAlerts(ctx context.Context, chatID int64, includeIDs bool) error {
@@ -466,7 +480,7 @@ func parseCheckWindow(value string) (string, error) {
 
 const silenceUsage = "Usage: <code>/silence alert-id duration</code>\nOr: <code>/silence instance=host,job=node_exporter duration</code>\nDurations: 10s, 10m, 10h, 10d, 1month."
 
-const helpMessage = "Commands:\n/? - show active tenant-1 alerts\n/id - show active tenant-1 alerts with Alertmanager ids\n/status - show bot and Alertmanager status\n/silences - show active tenant-1 silences\n/check instance range - compact node_exporter metrics for one instance\n/silence alert-id duration - silence one active alert selected by id\n/silence label=value,... duration - silence tenant-1 alerts by labels\n/ack alert-id - silence one active alert for 30m\n/unsilence silence-id - expire one active silence by id\n/help - show this command list\n\nSilence example: /silence instance=node-01,job=node_exporter 2h\nSilence durations: 10s, 10m, 10h, 10d, 1month.\nCheck ranges: 15m, 1h, 1d."
+const helpMessage = "Commands:\n/? - show active tenant-1 alerts\n/id - show active tenant-1 alerts with Alertmanager ids\n/status - show bot and Alertmanager status\n/silences - show active tenant-1 silences\n/check instance range - compact node_exporter metrics for one instance\n/coverage instance - alert rule coverage for one instance\n/silence alert-id duration - silence one active alert selected by id\n/silence label=value,... duration - silence tenant-1 alerts by labels\n/ack alert-id - silence one active alert for 30m\n/unsilence silence-id - expire one active silence by id\n/help - show this command list\n\nSilence example: /silence instance=node-01,job=node_exporter 2h\nSilence durations: 10s, 10m, 10h, 10d, 1month.\nCheck ranges: 15m, 1h, 1d."
 
 func telegramOperator(message *Message) string {
 	if message == nil || message.From == nil {

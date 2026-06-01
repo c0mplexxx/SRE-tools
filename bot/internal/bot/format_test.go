@@ -375,3 +375,21 @@ func TestRenderInstanceCheckUsesExpandableQuote(t *testing.T) {
 		t.Fatalf("check output should use expandable quote:\n%s", got)
 	}
 }
+
+func TestRenderInstanceCoverageUsesExpandableQuoteAndDedups(t *testing.T) {
+	t.Parallel()
+
+	got := RenderInstanceCoverageMessage(InstanceCoverage{
+		Tenant:     "1",
+		Instance:   "vm<1>",
+		Alertnames: []string{"rule_zeta", "rule_alpha", "rule<memory>", "rule_disk", "rule_alpha", "rule_systemd"},
+	})
+	for _, want := range []string{
+		"coverage tenant 1 | vm&lt;1&gt;",
+		"<blockquote expandable>rule&lt;memory&gt;\nrule_alpha\nrule_disk\nrule_systemd\nrule_zeta</blockquote>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("coverage output missing %q:\n%s", want, got)
+		}
+	}
+}

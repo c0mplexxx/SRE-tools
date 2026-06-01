@@ -124,6 +124,37 @@ func RenderInstanceCheckMessage(check InstanceCheck) string {
 	return header + "\n" + quoteBlock(lines, false)
 }
 
+func RenderInstanceCoverageMessage(coverage InstanceCoverage) string {
+	tenant := strings.TrimSpace(coverage.Tenant)
+	if tenant == "" {
+		tenant = TenantOne
+	}
+	header := "coverage tenant " + html.EscapeString(tenant) + " | " + html.EscapeString(coverage.Instance)
+	if len(coverage.Alertnames) == 0 {
+		return header + "\ncovered alertnames: 0"
+	}
+
+	alertnames := append([]string(nil), coverage.Alertnames...)
+	sort.Strings(alertnames)
+	lines := make([]string, 0, len(alertnames))
+	seen := make(map[string]struct{}, len(alertnames))
+	for _, alertname := range alertnames {
+		alertname = strings.TrimSpace(alertname)
+		if alertname == "" {
+			continue
+		}
+		if _, ok := seen[alertname]; ok {
+			continue
+		}
+		seen[alertname] = struct{}{}
+		lines = append(lines, html.EscapeString(alertname))
+	}
+	if len(lines) == 0 {
+		return header + "\ncovered alertnames: 0"
+	}
+	return header + "\n" + quoteBlock(lines, false)
+}
+
 func normalizeSilences(silences []AlertmanagerSilence) []silenceView {
 	views := make([]silenceView, 0, len(silences))
 	for _, silence := range silences {

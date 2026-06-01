@@ -357,6 +357,119 @@ func TestAlertmanagerClientCheckInstance(t *testing.T) {
 	}
 }
 
+func TestAlertmanagerClientCoverageInstance(t *testing.T) {
+	t.Parallel()
+
+	var vmalertCalled bool
+	var metricQueries []string
+	vmalert := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/rules" {
+			t.Fatalf("unexpected vmalert request %s %s", r.Method, r.URL.Path)
+		}
+		vmalertCalled = true
+		_, _ = w.Write([]byte(`{
+			"status": "success",
+			"data": {
+				"groups": [{
+					"rules": [
+						{"name": "rule_static_direct", "type": "alerting", "query": "vector(1)", "labels": {"tenant": "1", "instance": "node-01"}},
+						{"name": "rule_static_other", "type": "alerting", "query": "vector(1)", "labels": {"tenant": "1", "instance": "node-02"}},
+						{"name": "rule_notify_static", "type": "alerting", "query": "vector(1)", "labels": {"tenant": "1", "kind": "notify", "instance": "node-01"}},
+						{"name": "rule_recording", "type": "recording", "query": "vector(1)", "labels": {"tenant": "1", "instance": "node-01"}},
+						{"name": "rule_up_probe", "type": "alerting", "query": "up{job=~\".+\"} == 0", "labels": {"tenant": "1"}},
+						{"name": "rule_systemd_probe", "type": "alerting", "query": "node_systemd_unit_state{state=\"active\"} == 0", "labels": {"tenant": "1"}},
+						{"name": "rule_load_probe", "type": "alerting", "query": "node_load5 / count(node_cpu_seconds_total) > 2", "labels": {"tenant": "1"}},
+						{"name": "rule_disk_probe", "type": "alerting", "query": "node_filesystem_avail_bytes / node_filesystem_size_bytes < 0.1", "labels": {"tenant": "1", "severity": "warning"}},
+						{"name": "rule_disk_probe", "type": "alerting", "query": "node_filesystem_avail_bytes / node_filesystem_size_bytes < 0.05", "labels": {"tenant": "1", "severity": "critical"}},
+						{"name": "rule_memory_probe", "type": "alerting", "query": "node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.1", "labels": {"tenant": "1"}},
+						{"name": "rule_swap_probe", "type": "alerting", "query": "node_memory_SwapTotal_bytes > 0", "labels": {"tenant": "1"}},
+						{"name": "rule_proxy_probe", "type": "alerting", "query": "haproxy_backend_status == 0", "labels": {"tenant": "1"}},
+						{"name": "rule_network_probe", "type": "alerting", "query": "node_network_up == 0", "labels": {"tenant": "1"}},
+						{"name": "rule_placeholder", "type": "alerting", "query": "vector(1)", "labels": {"tenant": "1"}}
+					]
+				}]
+			}
+		}`))
+	}))
+	defer vmalert.Close()
+
+	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/query" {
+			t.Fatalf("unexpected metrics request %s %s", r.Method, r.URL.Path)
+		}
+		query := r.URL.Query().Get("query")
+		metricQueries = append(metricQueries, query)
+		writeCoverageQueryResult(t, w, query)
+	}))
+	defer metrics.Close()
+
+	client := &AlertmanagerClient{
+		MetricsBaseURLs: map[string]string{"1": metrics.URL},
+		VmalertBaseURLs: map[string]string{"1": vmalert.URL},
+		Client:          metrics.Client(),
+	}
+	coverage, err := client.CoverageInstance(context.Background(), "1", "node-01")
+	if err != nil {
+		t.Fatalf("CoverageInstance returned error: %v", err)
+	}
+	if !vmalertCalled {
+		t.Fatal("vmalert rules endpoint was not called")
+	}
+	want := "rule_disk_probe,rule_memory_probe,rule_network_probe,rule_proxy_probe,rule_static_direct,rule_systemd_probe,rule_up_probe"
+	if got := strings.Join(coverage.Alertnames, ","); got != want {
+		t.Fatalf("unexpected coverage alertnames:\ngot:  %s\nwant: %s", got, want)
+	}
+	joined := strings.Join(metricQueries, "\n")
+	for _, wantQueryPart := range []string{
+		`up{instance="node-01"}`,
+		`node_systemd_unit_state{job="node_exporter",instance="node-01",state="active"}`,
+		`node_filesystem_`,
+		`node_memory_`,
+		`haproxy_`,
+	} {
+		if !strings.Contains(joined, wantQueryPart) {
+			t.Fatalf("coverage query missing %q in:\n%s", wantQueryPart, joined)
+		}
+	}
+	for _, leaked := range []string{"rule_static_other", "rule_notify_static", "rule_recording", "rule_load_probe", "rule_swap_probe", "rule_placeholder"} {
+		if strings.Contains(strings.Join(coverage.Alertnames, ","), leaked) {
+			t.Fatalf("coverage leaked %s: %#v", leaked, coverage.Alertnames)
+		}
+	}
+}
+
+func TestAlertmanagerClientCoverageNetworkUsesSourceMetricProbe(t *testing.T) {
+	t.Parallel()
+
+	vmalert := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"status": "success",
+			"data": {"groups": [{"rules": [
+				{"name": "rule_network_probe", "type": "alerting", "query": "node_ethtool_link_detected == 0", "labels": {"tenant": "1"}}
+			]}]}
+		}`))
+	}))
+	defer vmalert.Close()
+
+	metrics := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeCoverageQueryResult(t, w, r.URL.Query().Get("query"))
+	}))
+	defer metrics.Close()
+
+	client := &AlertmanagerClient{
+		MetricsBaseURLs: map[string]string{"1": metrics.URL},
+		VmalertBaseURLs: map[string]string{"1": vmalert.URL},
+		Client:          metrics.Client(),
+	}
+	coverage, err := client.CoverageInstance(context.Background(), "1", "node-02")
+	if err != nil {
+		t.Fatalf("CoverageInstance returned error: %v", err)
+	}
+	if got := strings.Join(coverage.Alertnames, ","); got != "rule_network_probe" {
+		t.Fatalf("unexpected network coverage: %q", got)
+	}
+}
+
 func writeQueryResult(t *testing.T, w http.ResponseWriter, query string) {
 	t.Helper()
 	type sample struct {
@@ -408,5 +521,59 @@ func writeQueryResult(t *testing.T, w http.ResponseWriter, query string) {
 		Result []sample `json:"result"`
 	}{Result: result}}); err != nil {
 		t.Fatalf("encode query result: %v", err)
+	}
+}
+
+func writeCoverageQueryResult(t *testing.T, w http.ResponseWriter, query string) {
+	t.Helper()
+	type sample struct {
+		Metric map[string]string `json:"metric"`
+		Value  []any             `json:"value"`
+	}
+	value := func(v float64) sample {
+		return sample{Metric: map[string]string{"instance": "node-01"}, Value: []any{float64(1760000000), strconv.FormatFloat(v, 'f', -1, 64)}}
+	}
+
+	var result []sample
+	switch {
+	case strings.Contains(query, `up{instance="node-01"`):
+		result = []sample{value(1)}
+	case strings.Contains(query, `node_systemd_unit_state`) && strings.Contains(query, `state="active"`):
+		result = []sample{value(1)}
+	case strings.Contains(query, `node_load5`):
+		result = []sample{value(0.2)}
+	case strings.Contains(query, `node_cpu_seconds_total`) && strings.Contains(query, `instance="node-01"`):
+		result = nil
+	case strings.Contains(query, `node_filesystem_`):
+		result = []sample{value(1)}
+	case strings.Contains(query, `node_disk_`):
+		result = nil
+	case strings.Contains(query, `node_memory_SwapTotal_bytes`):
+		result = []sample{value(0)}
+	case strings.Contains(query, `node_memory_`):
+		result = []sample{value(1)}
+	case strings.Contains(query, `node_vmstat_`):
+		result = nil
+	case strings.Contains(query, `haproxy_`):
+		result = []sample{value(1)}
+	case strings.Contains(query, `node_ethtool_`) && strings.Contains(query, `instance="node-02"`):
+		result = []sample{value(1)}
+	case strings.Contains(query, `node_network_`) && strings.Contains(query, `instance="node-02"`):
+		result = []sample{value(1)}
+	case strings.Contains(query, `node_network_`) && strings.Contains(query, `instance="node-01"`):
+		result = []sample{value(1)}
+	default:
+		result = nil
+	}
+
+	if err := json.NewEncoder(w).Encode(struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []sample `json:"result"`
+		} `json:"data"`
+	}{Status: "success", Data: struct {
+		Result []sample `json:"result"`
+	}{Result: result}}); err != nil {
+		t.Fatalf("encode coverage query result: %v", err)
 	}
 }

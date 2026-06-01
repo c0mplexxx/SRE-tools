@@ -18,6 +18,7 @@ type AlertSource interface {
 	Status(context.Context) (AlertmanagerStatus, error)
 	ActiveSilences(context.Context) ([]AlertmanagerSilence, error)
 	CheckInstance(context.Context, string, string, string) (InstanceCheck, error)
+	CoverageInstance(context.Context, string, string) (InstanceCoverage, error)
 	SilenceAlert(context.Context, Alert, time.Duration, string, string) (Silence, error)
 	SilenceMatchers(context.Context, []SilenceMatcher, time.Duration, string, string) (Silence, error)
 	ExpireSilence(context.Context, string) error
@@ -26,6 +27,7 @@ type AlertSource interface {
 type AlertmanagerClient struct {
 	BaseURL         string
 	MetricsBaseURLs map[string]string
+	VmalertBaseURLs map[string]string
 	Client          *http.Client
 	Now             func() time.Time
 }

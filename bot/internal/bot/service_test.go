@@ -72,6 +72,9 @@ func TestHandleUpdateHelpReplies(t *testing.T) {
 			t.Fatalf("help reply missing %q: %q", want, telegram.sent[0].text)
 		}
 	}
+	if !bytes.Contains([]byte(telegram.sent[0].text), []byte("/coverage instance - alert rule coverage for one instance")) {
+		t.Fatalf("help reply missing coverage command: %q", telegram.sent[0].text)
+	}
 	if alerts.calls != 0 {
 		t.Fatalf("help fetched Alertmanager alerts: calls=%d", alerts.calls)
 	}
@@ -165,6 +168,83 @@ func TestHandleUpdateCheckRejectsInvalidWindow(t *testing.T) {
 	}
 	if len(telegram.sent) != 1 || !bytes.Contains([]byte(telegram.sent[0].text), []byte("Invalid range")) {
 		t.Fatalf("unexpected invalid-window reply: %#v", telegram.sent)
+	}
+}
+
+func TestHandleUpdateCoverageRequiresOneInstanceArg(t *testing.T) {
+	t.Parallel()
+
+	alerts := &fakeAlerts{}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+
+	for _, command := range []string{"/coverage", "/coverage node-01 extra"} {
+		if err := service.HandleUpdate(context.Background(), commandUpdate(42, command)); err != nil {
+			t.Fatalf("HandleUpdate(%q) returned error: %v", command, err)
+		}
+	}
+	if alerts.coverageCalls != 0 || alerts.calls != 0 {
+		t.Fatalf("invalid coverage usage queried APIs: coverage=%d activeAlerts=%d", alerts.coverageCalls, alerts.calls)
+	}
+	if len(telegram.sent) != 2 {
+		t.Fatalf("unexpected validation replies: %#v", telegram.sent)
+	}
+	for _, sent := range telegram.sent {
+		if !bytes.Contains([]byte(sent.text), []byte("Usage: <code>/coverage instance</code>")) {
+			t.Fatalf("unexpected coverage usage reply: %#v", telegram.sent)
+		}
+	}
+}
+
+func TestHandleUpdateCoverageRepliesWithEscapedCoveredAlertnames(t *testing.T) {
+	t.Parallel()
+
+	alerts := &fakeAlerts{coverage: InstanceCoverage{
+		Tenant:     "1",
+		Instance:   "vm<1>",
+		Alertnames: []string{"rule_systemd_probe", "rule<disk>", "rule_systemd_probe"},
+	}}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+
+	if err := service.HandleUpdate(context.Background(), commandUpdate(42, "/coverage vm<1>")); err != nil {
+		t.Fatalf("HandleUpdate returned error: %v", err)
+	}
+	if alerts.coverageCalls != 1 || alerts.coverageTenant != "1" || alerts.coverageInstance != "vm<1>" || alerts.calls != 0 {
+		t.Fatalf("unexpected coverage calls: coverage=%d tenant=%q instance=%q activeAlerts=%d", alerts.coverageCalls, alerts.coverageTenant, alerts.coverageInstance, alerts.calls)
+	}
+	if len(telegram.sent) != 1 {
+		t.Fatalf("unexpected Telegram messages: %#v", telegram.sent)
+	}
+	got := telegram.sent[0].text
+	for _, want := range []string{
+		"coverage tenant 1 | vm&lt;1&gt;",
+		"<blockquote>rule&lt;disk&gt;\nrule_systemd_probe</blockquote>",
+	} {
+		if !bytes.Contains([]byte(got), []byte(want)) {
+			t.Fatalf("coverage reply missing %q: %q", want, got)
+		}
+	}
+	if bytes.Contains([]byte(got), []byte("vm<1>")) || bytes.Contains([]byte(got), []byte("rule<disk>")) {
+		t.Fatalf("coverage reply was not HTML escaped: %q", got)
+	}
+}
+
+func TestHandleUpdateCoverageRepliesWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	alerts := &fakeAlerts{}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+
+	if err := service.HandleUpdate(context.Background(), commandUpdate(42, "/coverage node-01")); err != nil {
+		t.Fatalf("HandleUpdate returned error: %v", err)
+	}
+	if alerts.coverageCalls != 1 {
+		t.Fatalf("CoverageInstance calls=%d want 1", alerts.coverageCalls)
+	}
+	if len(telegram.sent) != 1 || !bytes.Contains([]byte(telegram.sent[0].text), []byte("covered alertnames: 0")) {
+		t.Fatalf("unexpected empty coverage reply: %#v", telegram.sent)
 	}
 }
 
@@ -530,6 +610,11 @@ type fakeAlerts struct {
 	checkInstance       string
 	checkWindow         string
 	checkCalls          int
+	coverage            InstanceCoverage
+	coverageErr         error
+	coverageTenant      string
+	coverageInstance    string
+	coverageCalls       int
 	silence             Silence
 	silenceErr          error
 	silenced            Alert
@@ -574,6 +659,19 @@ func (f *fakeAlerts) CheckInstance(_ context.Context, tenant, instance, window s
 		f.check.Window = window
 	}
 	return f.check, f.checkErr
+}
+
+func (f *fakeAlerts) CoverageInstance(_ context.Context, tenant, instance string) (InstanceCoverage, error) {
+	f.coverageCalls++
+	f.coverageTenant = tenant
+	f.coverageInstance = instance
+	if f.coverage.Tenant == "" {
+		f.coverage.Tenant = tenant
+	}
+	if f.coverage.Instance == "" {
+		f.coverage.Instance = instance
+	}
+	return f.coverage, f.coverageErr
 }
 
 func (f *fakeAlerts) SilenceAlert(_ context.Context, alert Alert, duration time.Duration, createdBy, comment string) (Silence, error) {

@@ -33,7 +33,8 @@ Optional config:
 | Name | Default |
 | --- | --- |
 | `ALERTMANAGER_URL` | `http://127.0.0.1:9093` |
-| `METRICS_URL_TENANT_1` | empty; required for `/check` |
+| `VMALERT_URL_TENANT_1` | `http://127.0.0.1:8881` |
+| `METRICS_URL_TENANT_1` | empty; required for `/check` and generic `/coverage` probes |
 | `METRICS_URL_TENANT_0` | empty; reserved for tenant-0 commands such as future traffic checks |
 | `HTTP_TIMEOUT` | `45s` |
 | `TELEGRAM_POLL_TIMEOUT` | `30s` |
@@ -53,6 +54,7 @@ Bot API default.
 /status                         bot and Alertmanager readiness/counts
 /silences                       active tenant-1 silences
 /check instance range           compact node_exporter metrics for one instance
+/coverage instance              alert rule coverage for one instance
 /silence alert-id duration      silence one current active alert by fingerprint
 /silence label=value,... duration
                                 silence tenant-1 alerts by exact labels
@@ -88,6 +90,35 @@ disk I/O busy devices, and top receive/transmit network rates.
 Quote bodies with more than four rendered lines use Telegram expandable quotes
 to keep chat output compact.
 
+`/coverage` is read-only and shows the tenant-1 alertnames whose rules can
+theoretically evaluate for one requested `instance`, even when those alerts are
+not firing. It reads the tenant-1 rule catalog from:
+
+```text
+GET ${VMALERT_URL_TENANT_1}/api/v1/rules
+```
+
+Then it keeps only alerting rules, excludes `labels.kind=notify`, and deduplicates
+the output by `alertname`. Static rules with `labels.instance` equal to the
+requested instance are covered directly. Generic rules are covered only when a
+small source-metric probe finds matching tenant-1 series in
+`METRICS_URL_TENANT_1`; the command does not evaluate alert expressions and does
+not query currently active Alertmanager alerts.
+
+The bot does not keep a public alertname catalog. Generic coverage is inferred
+from source metric families referenced by rule expressions, so ordinary new
+rules are picked up automatically when they use already supported exporters.
+Code changes are needed only when a new exporter or metric family needs a new
+coverage probe.
+
+```text
+/coverage node-01
+```
+
+The reply starts with `coverage tenant 1 | node-01` and then lists covered
+alertnames in sorted order, one per line. If no covered rule is found, the reply
+is `covered alertnames: 0`.
+
 ## Alert flow
 
 List commands query Alertmanager:
@@ -96,10 +127,10 @@ List commands query Alertmanager:
 GET http://127.0.0.1:9093/api/v2/alerts?active=true&silenced=false&inhibited=false
 ```
 
-The bot does not call tenant-scoped `vmalert` APIs. Tenant filtering happens
-from the Alertmanager alert labels after the API response is decoded. Alerts
-labeled `kind=notify` are omitted from the reply so one-shot operational
-notifications do not look like active incidents.
+Tenant filtering for active alerts happens from the Alertmanager alert labels
+after the API response is decoded. Alerts labeled `kind=notify` are omitted from
+the reply so one-shot operational notifications do not look like active
+incidents.
 
 The mutating commands are intentionally narrow. `/silence alert-id duration`
 and `/ack` re-read the active unsilenced tenant-1 list, find one exact
@@ -136,6 +167,16 @@ The `/check` command queries the tenant-1 datasource configured in
 `METRICS_URL_TENANT_1`:
 
 ```text
+GET ${METRICS_URL_TENANT_1}/api/v1/query
+```
+
+It does not call Alertmanager and does not mutate silences.
+
+The `/coverage` command queries the tenant-1 vmalert and metrics datasources
+configured in `VMALERT_URL_TENANT_1` and `METRICS_URL_TENANT_1`:
+
+```text
+GET ${VMALERT_URL_TENANT_1}/api/v1/rules
 GET ${METRICS_URL_TENANT_1}/api/v1/query
 ```
 
@@ -194,7 +235,8 @@ curl -fsS 'http://127.0.0.1:9093/api/v2/alerts?active=true&silenced=false&inhibi
 journalctl -u alert-list-bot.service -f
 ```
 
-Then send `/?`, `/id`, `/status`, `/silences`, `/check node-01 1h`, or
+Then send `/?`, `/id`, `/status`, `/silences`, `/check node-01 1h`,
+`/coverage node-01`, or
 `/help` from an allowlisted Telegram chat. Use an id from `/id` with
 `/silence alert-id duration` or `/ack alert-id` only when one current
 expendable alert should stop notifying. Use
