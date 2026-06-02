@@ -76,7 +76,7 @@ func TestRenderAlertMessagesStandardAndCPUFormatting(t *testing.T) {
 	got := strings.Join(messages, "")
 
 	for _, want := range []string{
-		"Active alerts tenant 1: 4",
+		"Active alerts non-zero tenants: 4",
 		"🟥 <b>CRITICAL</b> (2)",
 		"HIGH | node-02 | 70.2%",
 		"DOWN | node-01 | example.service",
@@ -91,6 +91,48 @@ func TestRenderAlertMessagesStandardAndCPUFormatting(t *testing.T) {
 	}
 	if strings.Index(got, "dosgate_cpu") > strings.Index(got, "disk_space") {
 		t.Fatalf("critical alert should precede warning alert:\n%s", got)
+	}
+}
+
+func TestRenderAlertMessagesGroupsNonZeroTenants(t *testing.T) {
+	t.Parallel()
+
+	messages, err := RenderAlertMessages([]Alert{
+		{
+			Labels:      map[string]string{"tenant": "4", "severity": "warning", "alertname": "disk_space", "instance": "node-04"},
+			Annotations: map[string]string{"line": "tenant 4 disk"},
+		},
+		{
+			Labels:      map[string]string{"tenant": "1", "severity": "critical", "alertname": "systemd_down", "instance": "node-01", "name": "vmagent.service"},
+			Annotations: map[string]string{"line": "tenant 1 systemd"},
+		},
+		{
+			Labels:      map[string]string{"tenant": "10", "severity": "critical", "alertname": "scrape_down", "instance": "node-10", "job": "vmagent"},
+			Annotations: map[string]string{"line": "tenant 10 scrape"},
+		},
+	}, DefaultTelegramMessageLimit, true)
+	if err != nil {
+		t.Fatalf("RenderAlertMessages returned error: %v", err)
+	}
+	got := strings.Join(messages, "")
+	for _, want := range []string{
+		"Active alerts non-zero tenants: 3",
+		"tenant 1 systemd",
+		"<b>tenant 4</b>",
+		"tenant 4 disk",
+		"<b>tenant 10</b>",
+		"tenant 10 scrape",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("multi-tenant output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "<b>tenant 1</b>") {
+		t.Fatalf("tenant 1 should keep the legacy section style:\n%s", got)
+	}
+	if !(strings.Index(got, "tenant 1 systemd") < strings.Index(got, "<b>tenant 4</b>") &&
+		strings.Index(got, "<b>tenant 4</b>") < strings.Index(got, "<b>tenant 10</b>")) {
+		t.Fatalf("tenant sections are not sorted as expected:\n%s", got)
 	}
 }
 
@@ -141,7 +183,7 @@ func TestRenderSilenceMessagesUsesAlertLikeBlocks(t *testing.T) {
 	}
 	got := strings.Join(messages, "")
 	for _, want := range []string{
-		"Active silences tenant 1: 1",
+		"Active silences non-zero tenants: 1",
 		"🟨 <b>WARNING</b> (1)",
 		"<b>disk_space</b>",
 		"<blockquote>DOWN | node-01 | /var | disk_space",
@@ -160,6 +202,54 @@ func TestRenderSilenceMessagesUsesAlertLikeBlocks(t *testing.T) {
 	}
 	if strings.Count(got, "<blockquote") != strings.Count(got, "</blockquote>") {
 		t.Fatalf("silence output has broken blockquote HTML:\n%s", got)
+	}
+}
+
+func TestRenderSilenceMessagesGroupsNonZeroTenants(t *testing.T) {
+	setRenderNow(t, mustTime(t, "2026-05-20T05:30:00Z"))
+
+	messages, err := RenderSilenceMessages([]AlertmanagerSilence{
+		{
+			ID:     "tenant-four",
+			EndsAt: mustTime(t, "2026-05-22T18:00:00Z"),
+			Matchers: []SilenceMatcher{
+				{Name: "tenant", Value: "4", IsEqual: true},
+				{Name: "severity", Value: "warning", IsEqual: true},
+				{Name: "alertname", Value: "disk_space", IsEqual: true},
+				{Name: "instance", Value: "node-04", IsEqual: true},
+			},
+		},
+		{
+			ID:     "tenant-one",
+			EndsAt: mustTime(t, "2026-05-22T17:00:00Z"),
+			Matchers: []SilenceMatcher{
+				{Name: "tenant", Value: "1", IsEqual: true},
+				{Name: "severity", Value: "critical", IsEqual: true},
+				{Name: "alertname", Value: "systemd_down", IsEqual: true},
+				{Name: "instance", Value: "node-01", IsEqual: true},
+				{Name: "name", Value: "vmagent.service", IsEqual: true},
+			},
+		},
+	}, DefaultTelegramMessageLimit)
+	if err != nil {
+		t.Fatalf("RenderSilenceMessages returned error: %v", err)
+	}
+	got := strings.Join(messages, "")
+	for _, want := range []string{
+		"Active silences non-zero tenants: 2",
+		"id: <code>tenant-one</code>",
+		"<b>tenant 4</b>",
+		"id: <code>tenant-four</code>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("multi-tenant silence output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "<b>tenant 1</b>") {
+		t.Fatalf("tenant 1 silence should keep the legacy section style:\n%s", got)
+	}
+	if strings.Index(got, "id: <code>tenant-one</code>") > strings.Index(got, "<b>tenant 4</b>") {
+		t.Fatalf("tenant 1 silence should render before tenant 4:\n%s", got)
 	}
 }
 

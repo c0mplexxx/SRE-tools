@@ -23,8 +23,10 @@ func TestAlertmanagerClientStatus(t *testing.T) {
 		case "/api/v2/alerts":
 			_, _ = w.Write([]byte(`[
 				{"labels": {"tenant": "1", "alertname": "systemd_down"}},
+				{"labels": {"tenant": "4", "alertname": "scrape_down"}},
 				{"labels": {"tenant": "1", "kind": "notify", "alertname": "note"}},
-				{"labels": {"tenant": "0", "alertname": "other"}}
+				{"labels": {"tenant": "0", "alertname": "other"}},
+				{"labels": {"alertname": "missing_tenant"}}
 			]`))
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
@@ -37,7 +39,7 @@ func TestAlertmanagerClientStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status returned error: %v", err)
 	}
-	if !readyCalled || !status.Ready || status.ActiveTenantAlerts != 1 {
+	if !readyCalled || !status.Ready || status.ActiveTenantAlerts != 2 {
 		t.Fatalf("unexpected status: readyCalled=%v status=%#v", readyCalled, status)
 	}
 }
@@ -61,11 +63,20 @@ func TestAlertmanagerClientActiveTenantAlerts(t *testing.T) {
 				"status": {"state": "active", "silencedBy": [], "inhibitedBy": [], "mutedBy": []}
 			},
 			{
+				"fingerprint": "tenant-four",
+				"labels": {"tenant": "4", "alertname": "disk_space"},
+				"status": {"state": "active"}
+			},
+			{
 				"labels": {"tenant": "1", "alertname": "scrape_target_added", "kind": "notify"},
 				"status": {"state": "active"}
 			},
 			{
 				"labels": {"tenant": "0", "alertname": "report"},
+				"status": {"state": "active"}
+			},
+			{
+				"labels": {"alertname": "missing_tenant"},
 				"status": {"state": "active"}
 			}
 		]`))
@@ -73,14 +84,14 @@ func TestAlertmanagerClientActiveTenantAlerts(t *testing.T) {
 	defer server.Close()
 
 	client := &AlertmanagerClient{BaseURL: server.URL, Client: server.Client()}
-	alerts, err := client.ActiveTenantAlerts(context.Background(), "1")
+	alerts, err := client.ActiveTenantAlerts(context.Background(), TenantNonZero)
 	if err != nil {
 		t.Fatalf("ActiveTenantAlerts returned error: %v", err)
 	}
 	if !sawQuery {
 		t.Fatal("Alertmanager filters were not present in query")
 	}
-	if len(alerts) != 1 || alerts[0].label("alertname") != "systemd_down" {
+	if len(alerts) != 2 || alerts[0].label("alertname") != "systemd_down" || alerts[1].label("tenant") != "4" {
 		t.Fatalf("unexpected tenant alerts: %#v", alerts)
 	}
 }
@@ -247,6 +258,12 @@ func TestAlertmanagerClientActiveSilences(t *testing.T) {
 				"matchers": [{"name":"tenant","value":"1","isEqual":true}]
 			},
 			{
+				"id": "tenant-four",
+				"status": {"state": "active"},
+				"endsAt": "2026-05-21T12:30:00Z",
+				"matchers": [{"name":"tenant","value":"4","isEqual":true}]
+			},
+			{
 				"id": "inactive",
 				"status": {"state": "expired"},
 				"endsAt": "2026-05-20T12:00:00Z",
@@ -282,7 +299,7 @@ func TestAlertmanagerClientActiveSilences(t *testing.T) {
 	if len(silences) != 3 {
 		t.Fatalf("unexpected silences: %#v", silences)
 	}
-	if got := []string{silences[0].ID, silences[1].ID, silences[2].ID}; strings.Join(got, ",") != "first,global,later" {
+	if got := []string{silences[0].ID, silences[1].ID, silences[2].ID}; strings.Join(got, ",") != "tenant-four,first,later" {
 		t.Fatalf("silences not filtered/sorted: %#v", got)
 	}
 }

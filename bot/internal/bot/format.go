@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,6 +23,7 @@ const (
 const expandableQuoteLineThreshold = 4
 
 type alertView struct {
+	tenant    string
 	bucket    bucket
 	alertname string
 	instance  string
@@ -30,6 +32,7 @@ type alertView struct {
 }
 
 type silenceView struct {
+	tenant    string
 	bucket    bucket
 	alertname string
 	instance  string
@@ -50,7 +53,7 @@ func RenderSilenceMessages(silences []AlertmanagerSilence, limit int) ([]string,
 		limit = DefaultTelegramMessageLimit
 	}
 	if len(silences) == 0 {
-		return []string{"Active silences tenant 1: 0"}, nil
+		return []string{"Active silences non-zero tenants: 0"}, nil
 	}
 
 	sorted := append([]AlertmanagerSilence(nil), silences...)
@@ -66,6 +69,8 @@ func RenderSilenceMessages(silences []AlertmanagerSilence, limit int) ([]string,
 	sort.SliceStable(views, func(i, j int) bool {
 		left, right := views[i], views[j]
 		switch {
+		case left.tenant != right.tenant:
+			return tenantLess(left.tenant, right.tenant)
 		case left.bucket != right.bucket:
 			return left.bucket < right.bucket
 		case left.alertname != right.alertname:
@@ -79,28 +84,38 @@ func RenderSilenceMessages(silences []AlertmanagerSilence, limit int) ([]string,
 		}
 	})
 
-	blocks := []string{fmt.Sprintf("Active silences tenant 1: %d", len(sorted))}
-	for start := 0; start < len(views); {
-		currentBucket := views[start].bucket
-		bucketEnd := start + 1
-		for bucketEnd < len(views) && views[bucketEnd].bucket == currentBucket {
-			bucketEnd++
+	blocks := []string{fmt.Sprintf("Active silences non-zero tenants: %d", len(sorted))}
+	for tenantStart := 0; tenantStart < len(views); {
+		tenantEnd := tenantStart + 1
+		for tenantEnd < len(views) && views[tenantEnd].tenant == views[tenantStart].tenant {
+			tenantEnd++
 		}
-		blocks = append(blocks, "\n\n"+bucketTitle(currentBucket, bucketEnd-start))
-		for start < bucketEnd {
-			end := start + 1
-			for end < bucketEnd && views[end].alertname == views[start].alertname {
-				end++
-			}
-			groupBlocks, err := splitSilenceGroupBlocks(views[start:end], limit)
-			if err != nil {
-				return nil, err
-			}
-			for _, block := range groupBlocks {
-				blocks = append(blocks, "\n"+block)
-			}
-			start = end
+		if views[tenantStart].tenant != TenantOne {
+			blocks = append(blocks, "\n\n"+tenantTitle(views[tenantStart].tenant))
 		}
+		for start := tenantStart; start < tenantEnd; {
+			currentBucket := views[start].bucket
+			bucketEnd := start + 1
+			for bucketEnd < tenantEnd && views[bucketEnd].bucket == currentBucket {
+				bucketEnd++
+			}
+			blocks = append(blocks, "\n\n"+bucketTitle(currentBucket, bucketEnd-start))
+			for start < bucketEnd {
+				end := start + 1
+				for end < bucketEnd && views[end].alertname == views[start].alertname {
+					end++
+				}
+				groupBlocks, err := splitSilenceGroupBlocks(views[start:end], limit)
+				if err != nil {
+					return nil, err
+				}
+				for _, block := range groupBlocks {
+					blocks = append(blocks, "\n"+block)
+				}
+				start = end
+			}
+		}
+		tenantStart = tenantEnd
 	}
 	return chunkBlocks(blocks, limit)
 }
@@ -165,6 +180,7 @@ func normalizeSilences(silences []AlertmanagerSilence) []silenceView {
 		}
 		entity := entityLabel(alert)
 		views = append(views, silenceView{
+			tenant:    silenceTenant(silence),
 			bucket:    severityBucket(silenceSeverity(alert)),
 			alertname: alertname,
 			instance:  alert.label("instance"),
@@ -180,13 +196,15 @@ func renderAlertMessages(alerts []Alert, limit int, expandableQuotes, includeIDs
 		limit = DefaultTelegramMessageLimit
 	}
 	if len(alerts) == 0 {
-		return []string{"Active alerts tenant 1: 0"}, nil
+		return []string{"Active alerts non-zero tenants: 0"}, nil
 	}
 
 	views := normalize(alerts, includeIDs)
 	sort.SliceStable(views, func(i, j int) bool {
 		left, right := views[i], views[j]
 		switch {
+		case left.tenant != right.tenant:
+			return tenantLess(left.tenant, right.tenant)
 		case left.bucket != right.bucket:
 			return left.bucket < right.bucket
 		case left.alertname != right.alertname:
@@ -200,33 +218,43 @@ func renderAlertMessages(alerts []Alert, limit int, expandableQuotes, includeIDs
 		}
 	})
 
-	blocks := []string{fmt.Sprintf("Active alerts tenant 1: %d", len(alerts))}
-	for start := 0; start < len(views); {
-		currentBucket := views[start].bucket
-		bucketEnd := start + 1
-		for bucketEnd < len(views) && views[bucketEnd].bucket == currentBucket {
-			bucketEnd++
+	blocks := []string{fmt.Sprintf("Active alerts non-zero tenants: %d", len(alerts))}
+	for tenantStart := 0; tenantStart < len(views); {
+		tenantEnd := tenantStart + 1
+		for tenantEnd < len(views) && views[tenantEnd].tenant == views[tenantStart].tenant {
+			tenantEnd++
 		}
-		bucketCount := bucketEnd - start
-		sectionStarted := false
-		for start < bucketEnd {
-			end := start + 1
-			for end < len(views) && views[end].bucket == currentBucket && views[end].alertname == views[start].alertname {
-				end++
+		if views[tenantStart].tenant != TenantOne {
+			blocks = append(blocks, "\n\n"+tenantTitle(views[tenantStart].tenant))
+		}
+		for start := tenantStart; start < tenantEnd; {
+			currentBucket := views[start].bucket
+			bucketEnd := start + 1
+			for bucketEnd < tenantEnd && views[bucketEnd].bucket == currentBucket {
+				bucketEnd++
 			}
+			bucketCount := bucketEnd - start
+			sectionStarted := false
+			for start < bucketEnd {
+				end := start + 1
+				for end < bucketEnd && views[end].alertname == views[start].alertname {
+					end++
+				}
 
-			prefix := ""
-			if !sectionStarted {
-				prefix = "\n\n" + bucketTitle(currentBucket, bucketCount) + "\n"
-				sectionStarted = true
+				prefix := ""
+				if !sectionStarted {
+					prefix = "\n\n" + bucketTitle(currentBucket, bucketCount) + "\n"
+					sectionStarted = true
+				}
+				groupBlocks, err := splitGroupBlocks(prefix, views[start:end], limit, expandableQuotes)
+				if err != nil {
+					return nil, err
+				}
+				blocks = append(blocks, groupBlocks...)
+				start = end
 			}
-			groupBlocks, err := splitGroupBlocks(prefix, views[start:end], limit, expandableQuotes)
-			if err != nil {
-				return nil, err
-			}
-			blocks = append(blocks, groupBlocks...)
-			start = end
 		}
+		tenantStart = tenantEnd
 	}
 	return chunkBlocks(blocks, limit)
 }
@@ -425,6 +453,19 @@ func silenceAlert(silence AlertmanagerSilence) Alert {
 	return Alert{Labels: labels}
 }
 
+func silenceTenant(silence AlertmanagerSilence) string {
+	for _, matcher := range silence.Matchers {
+		if matcher.Name != "tenant" || !matcher.IsEqual {
+			continue
+		}
+		if !matcher.IsRegex {
+			return strings.TrimSpace(matcher.Value)
+		}
+		return humanMatcherValue(matcher)
+	}
+	return ""
+}
+
 func humanMatcherValue(matcher SilenceMatcher) string {
 	if !matcher.IsRegex {
 		return matcher.Value
@@ -475,6 +516,7 @@ func normalize(alerts []Alert, includeIDs bool) []alertView {
 			body = renderIDBody(alert, body)
 		}
 		views = append(views, alertView{
+			tenant:    alert.label("tenant"),
 			bucket:    severityBucket(alert.label("severity")),
 			alertname: alertname,
 			instance:  alert.label("instance"),
@@ -483,6 +525,28 @@ func normalize(alerts []Alert, includeIDs bool) []alertView {
 		})
 	}
 	return views
+}
+
+func tenantTitle(tenant string) string {
+	if tenant == "" {
+		tenant = "unknown"
+	}
+	return "<b>tenant " + html.EscapeString(tenant) + "</b>"
+}
+
+func tenantLess(left, right string) bool {
+	if left == TenantOne {
+		return true
+	}
+	if right == TenantOne {
+		return false
+	}
+	leftNum, leftErr := strconv.Atoi(left)
+	rightNum, rightErr := strconv.Atoi(right)
+	if leftErr == nil && rightErr == nil {
+		return leftNum < rightNum
+	}
+	return left < right
 }
 
 func renderIDBody(alert Alert, body string) string {

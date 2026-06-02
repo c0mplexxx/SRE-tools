@@ -2,9 +2,11 @@ package bot
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"html"
 	"log"
+	"math/big"
 	"regexp"
 	"sort"
 	"strconv"
@@ -71,7 +73,12 @@ func (s *Service) HandleUpdate(ctx context.Context, update Update) error {
 		return nil
 	}
 
-	fields := strings.Fields(strings.TrimSpace(update.Message.Text))
+	text := strings.TrimSpace(update.Message.Text)
+	if isDeployJokeIntent(text) {
+		return s.Telegram.SendMessage(ctx, chatID, randomDeployJoke())
+	}
+
+	fields := strings.Fields(text)
 	if len(fields) == 0 {
 		return nil
 	}
@@ -120,7 +127,7 @@ func (s *Service) replyStatus(ctx context.Context, chatID int64) error {
 	status, err := s.Alerts.Status(ctx)
 	if err != nil {
 		s.logger().Printf("Alertmanager status failed for chat %d: %v", chatID, err)
-		return s.Telegram.SendMessage(ctx, chatID, "Bot: ok\nAlertmanager: unavailable\nActive tenant-1 alerts: unknown\nActive tenant-1 silences: unknown")
+		return s.Telegram.SendMessage(ctx, chatID, "Bot: ok\nAlertmanager: unavailable\nActive non-zero tenant alerts: unknown\nActive non-zero tenant silences: unknown")
 	}
 
 	silences, err := s.Alerts.ActiveSilences(ctx)
@@ -136,7 +143,7 @@ func (s *Service) replyStatus(ctx context.Context, chatID int64) error {
 		alertmanagerState = "ready"
 	}
 	return s.Telegram.SendMessage(ctx, chatID, fmt.Sprintf(
-		"Bot: ok\nAlertmanager: %s\nActive tenant-1 alerts: %d\nActive tenant-1 silences: %s",
+		"Bot: ok\nAlertmanager: %s\nActive non-zero tenant alerts: %d\nActive non-zero tenant silences: %s",
 		alertmanagerState,
 		status.ActiveTenantAlerts,
 		silenceCount,
@@ -191,7 +198,7 @@ func (s *Service) replyCoverage(ctx context.Context, chatID int64, fields []stri
 }
 
 func (s *Service) replyAlerts(ctx context.Context, chatID int64, includeIDs bool) error {
-	alerts, err := s.Alerts.ActiveTenantAlerts(ctx, TenantOne)
+	alerts, err := s.Alerts.ActiveTenantAlerts(ctx, TenantNonZero)
 	if err != nil {
 		s.logger().Printf("Alertmanager fetch failed for chat %d: %v", chatID, err)
 		return s.Telegram.SendMessage(ctx, chatID, "Could not fetch active Alertmanager alerts right now.")
@@ -232,14 +239,14 @@ func (s *Service) silenceAlert(ctx context.Context, chatID int64, message *Messa
 		return s.Telegram.SendMessage(ctx, chatID, silenceUsage)
 	}
 
-	alerts, err := s.Alerts.ActiveTenantAlerts(ctx, TenantOne)
+	alerts, err := s.Alerts.ActiveTenantAlerts(ctx, TenantNonZero)
 	if err != nil {
 		s.logger().Printf("Alertmanager fetch before silence failed for chat %d: %v", chatID, err)
 		return s.Telegram.SendMessage(ctx, chatID, "Could not fetch active Alertmanager alerts right now.")
 	}
 	alert, ok := alertByID(alerts, fields[1])
 	if !ok {
-		return s.Telegram.SendMessage(ctx, chatID, "Active tenant-1 alert id not found. Send /id for current alert ids.")
+		return s.Telegram.SendMessage(ctx, chatID, "Active non-zero tenant alert id not found. Send /id for current alert ids.")
 	}
 	silence, err := s.Alerts.SilenceAlert(ctx, alert, duration, telegramOperator(message), "")
 	if err != nil {
@@ -277,14 +284,14 @@ func (s *Service) ackAlert(ctx context.Context, chatID int64, message *Message, 
 		return s.Telegram.SendMessage(ctx, chatID, "Usage: <code>/ack alert-id</code>")
 	}
 
-	alerts, err := s.Alerts.ActiveTenantAlerts(ctx, TenantOne)
+	alerts, err := s.Alerts.ActiveTenantAlerts(ctx, TenantNonZero)
 	if err != nil {
 		s.logger().Printf("Alertmanager fetch before ack failed for chat %d: %v", chatID, err)
 		return s.Telegram.SendMessage(ctx, chatID, "Could not fetch active Alertmanager alerts right now.")
 	}
 	alert, ok := alertByID(alerts, fields[1])
 	if !ok {
-		return s.Telegram.SendMessage(ctx, chatID, "Active tenant-1 alert id not found. Send /id for current alert ids.")
+		return s.Telegram.SendMessage(ctx, chatID, "Active non-zero tenant alert id not found. Send /id for current alert ids.")
 	}
 	silence, err := s.Alerts.SilenceAlert(ctx, alert, 30*time.Minute, telegramOperator(message), "Acked from Telegram for active alert "+alert.Fingerprint)
 	if err != nil {
@@ -478,9 +485,54 @@ func parseCheckWindow(value string) (string, error) {
 	return value, nil
 }
 
+func isDeployJokeIntent(text string) bool {
+	return strings.EqualFold(strings.TrimSpace(text), "deploy")
+}
+
+func randomDeployJoke() string {
+	index, err := rand.Int(rand.Reader, big.NewInt(int64(len(deployJokes))))
+	if err != nil {
+		return html.EscapeString(deployJokes[0])
+	}
+	return html.EscapeString(deployJokes[index.Int64()])
+}
+
+var deployJokes = []string{
+	"Ура, ура, деплойчик",
+	"Сегодня пятница?)",
+	"Опять в пятницу?)",
+	"Клик не падает, при деплое алерты не потеряем))",
+	"Деплой пошел, дежурный морально пристегнулся",
+	"Сначала деплой, потом чай, потом объяснительная",
+	"Если алерты молчат, значит они тоже на ревью",
+	"Катим тихо, как будто так и было задумано",
+	"Прод не трогаем, он сам все видел",
+	"Деплой без отката - это стендап с элементами риска",
+	"Синий график вниз, зеленый график вверх, настроение стабильно",
+	"AntiDDoS держится, SRE улыбается глазами",
+	"Пятничный деплой считается пятничным только после алерта",
+	"Кнопка нажата, совесть в read-only",
+	"Если что, это был canary на весь кластер",
+	"Релиз малый, вера большая",
+	"Пока метрики грузятся, деплой уже в истории",
+	"Дежурный сказал можно, но без свидетелей",
+	"Откат рядом, значит можно смелее",
+	"Никакой паники, только контролируемая турбулентность",
+	"Деплой прошел, теперь проверяем, был ли он нужен",
+	"Чем тише changelog, тем громче сердце SRE",
+	"Сервис перезапущен, легенда обновлена",
+	"Бинарь свежий, журнал внимательный",
+	"План был надежный, особенно пункт про удачу",
+	"У нас не баг, у нас постдеплойная диагностика",
+	"Графики приняли деплой без лишних вопросов",
+	"Сейчас все стабильно, но это не повод расслабляться",
+	"Деплой на одну минуту, воспоминаний на весь спринт",
+	"Проверка прошла, можно снова делать вид, что это рутина",
+}
+
 const silenceUsage = "Usage: <code>/silence alert-id duration</code>\nOr: <code>/silence instance=host,job=node_exporter duration</code>\nDurations: 10s, 10m, 10h, 10d, 1month."
 
-const helpMessage = "Commands:\n/? - show active tenant-1 alerts\n/id - show active tenant-1 alerts with Alertmanager ids\n/status - show bot and Alertmanager status\n/silences - show active tenant-1 silences\n/check instance range - compact node_exporter metrics for one instance\n/coverage instance - alert rule coverage for one instance\n/silence alert-id duration - silence one active alert selected by id\n/silence label=value,... duration - silence tenant-1 alerts by labels\n/ack alert-id - silence one active alert for 30m\n/unsilence silence-id - expire one active silence by id\n/help - show this command list\n\nSilence example: /silence instance=node-01,job=node_exporter 2h\nSilence durations: 10s, 10m, 10h, 10d, 1month.\nCheck ranges: 15m, 1h, 1d."
+const helpMessage = "Commands:\n/? - show active non-zero tenant alerts\n/id - show active non-zero tenant alerts with Alertmanager ids\n/status - show bot and Alertmanager status\n/silences - show active non-zero tenant silences\n/check instance range - compact node_exporter metrics for one instance\n/coverage instance - alert rule coverage for one instance\n/silence alert-id duration - silence one active alert selected by id\n/silence label=value,... duration - silence tenant-1 alerts by labels\n/ack alert-id - silence one active alert for 30m\n/unsilence silence-id - expire one active silence by id\ndeploy - random non-mutating deploy joke\n/help - show this command list\n\nSilence example: /silence instance=node-01,job=node_exporter 2h\nSilence durations: 10s, 10m, 10h, 10d, 1month.\nCheck ranges: 15m, 1h, 1d."
 
 func telegramOperator(message *Message) string {
 	if message == nil || message.From == nil {

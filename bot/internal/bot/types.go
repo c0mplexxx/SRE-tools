@@ -4,6 +4,8 @@ import "strings"
 
 const (
 	TenantOne                   = "1"
+	TenantZero                  = "0"
+	TenantNonZero               = "non-zero"
 	DefaultTelegramMessageLimit = 4096
 )
 
@@ -21,6 +23,11 @@ func (a Alert) label(name string) string {
 
 func (a Alert) annotation(name string) string {
 	return strings.TrimSpace(a.Annotations[name])
+}
+
+func isExplicitNonZeroTenant(tenant string) bool {
+	tenant = strings.TrimSpace(tenant)
+	return tenant != "" && tenant != TenantZero
 }
 
 type InstanceCheck struct {

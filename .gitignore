@@ -1,3 +1,5 @@
 AGENTS.md
 bot/alert-list-bot
 bot/alert-list-bot-linux-amd64
+bot/dist/
+bot/*.deb

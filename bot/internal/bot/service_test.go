@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"html"
 	"log"
 	"testing"
 	"time"
@@ -49,6 +50,61 @@ func TestHandleUpdateIDCommandIncludesFingerprint(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateIDCommandShowsOnlyNonZeroTenantAlerts(t *testing.T) {
+	t.Parallel()
+
+	alerts := &fakeAlerts{alerts: []Alert{
+		{
+			Fingerprint: "tenant-one",
+			Labels:      map[string]string{"tenant": "1", "severity": "critical", "alertname": "systemd_down"},
+			Annotations: map[string]string{"line": "tenant one"},
+		},
+		{
+			Fingerprint: "tenant-four",
+			Labels:      map[string]string{"tenant": "4", "severity": "warning", "alertname": "disk_space"},
+			Annotations: map[string]string{"line": "tenant four"},
+		},
+		{
+			Fingerprint: "tenant-zero",
+			Labels:      map[string]string{"tenant": "0", "alertname": "report"},
+			Annotations: map[string]string{"line": "tenant zero"},
+		},
+		{
+			Fingerprint: "missing-tenant",
+			Labels:      map[string]string{"alertname": "report"},
+			Annotations: map[string]string{"line": "missing tenant"},
+		},
+		{
+			Fingerprint: "notify-alert",
+			Labels:      map[string]string{"tenant": "4", "kind": "notify", "alertname": "scrape_target_added"},
+			Annotations: map[string]string{"line": "notify"},
+		},
+	}}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+
+	if err := service.HandleUpdate(context.Background(), commandUpdate(42, "/id")); err != nil {
+		t.Fatalf("HandleUpdate returned error: %v", err)
+	}
+	if alerts.activeTenant != TenantNonZero {
+		t.Fatalf("ActiveTenantAlerts tenant=%q want %q", alerts.activeTenant, TenantNonZero)
+	}
+	if len(telegram.sent) != 1 {
+		t.Fatalf("unexpected Telegram messages: %#v", telegram.sent)
+	}
+	got := telegram.sent[0].text
+	for _, want := range []string{"<code>tenant-one</code>", "<code>tenant-four</code>", "<b>tenant 4</b>"} {
+		if !bytes.Contains([]byte(got), []byte(want)) {
+			t.Fatalf("id reply missing %q: %q", want, got)
+		}
+	}
+	for _, unwanted := range []string{"tenant-zero", "missing-tenant", "notify-alert"} {
+		if bytes.Contains([]byte(got), []byte(unwanted)) {
+			t.Fatalf("id reply leaked %q: %q", unwanted, got)
+		}
+	}
+}
+
 func TestHandleUpdateHelpReplies(t *testing.T) {
 	t.Parallel()
 
@@ -72,11 +128,90 @@ func TestHandleUpdateHelpReplies(t *testing.T) {
 			t.Fatalf("help reply missing %q: %q", want, telegram.sent[0].text)
 		}
 	}
+	if !bytes.Contains([]byte(telegram.sent[0].text), []byte("deploy - random non-mutating deploy joke")) {
+		t.Fatalf("help reply missing deploy joke code word: %q", telegram.sent[0].text)
+	}
 	if !bytes.Contains([]byte(telegram.sent[0].text), []byte("/coverage instance - alert rule coverage for one instance")) {
 		t.Fatalf("help reply missing coverage command: %q", telegram.sent[0].text)
 	}
 	if alerts.calls != 0 {
 		t.Fatalf("help fetched Alertmanager alerts: calls=%d", alerts.calls)
+	}
+}
+
+func TestHandleUpdateDeployJokeRepliesWithoutAlertmanager(t *testing.T) {
+	t.Parallel()
+
+	alerts := &fakeAlerts{}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+
+	if err := service.HandleUpdate(context.Background(), commandUpdate(42, "deploy")); err != nil {
+		t.Fatalf("HandleUpdate returned error: %v", err)
+	}
+	if len(telegram.sent) != 1 || telegram.sent[0].chatID != 42 {
+		t.Fatalf("unexpected Telegram messages: %#v", telegram.sent)
+	}
+	if !isDeployJokeReply(telegram.sent[0].text) {
+		t.Fatalf("deploy reply is not from phrase bank: %q", telegram.sent[0].text)
+	}
+	if bytes.ContainsAny([]byte(telegram.sent[0].text), "<>") {
+		t.Fatalf("deploy reply contains raw HTML angle brackets: %q", telegram.sent[0].text)
+	}
+	if alerts.calls != 0 || alerts.statusCalls != 0 || alerts.silenceListCalls != 0 || alerts.checkCalls != 0 || alerts.coverageCalls != 0 || alerts.silenceCalls != 0 || alerts.silenceMatcherCalls != 0 || alerts.expireCalls != 0 {
+		t.Fatalf("deploy joke touched Alertmanager: %#v", alerts)
+	}
+}
+
+func TestHandleUpdateDeployJokeNormalizesTrimAndCase(t *testing.T) {
+	t.Parallel()
+
+	for _, text := range []string{" Deploy ", "DEPLOY"} {
+		alerts := &fakeAlerts{}
+		telegram := &fakeTelegram{}
+		service := testService(alerts, telegram)
+
+		if err := service.HandleUpdate(context.Background(), commandUpdate(42, text)); err != nil {
+			t.Fatalf("HandleUpdate(%q) returned error: %v", text, err)
+		}
+		if len(telegram.sent) != 1 || !isDeployJokeReply(telegram.sent[0].text) {
+			t.Fatalf("HandleUpdate(%q) unexpected reply: %#v", text, telegram.sent)
+		}
+		if alerts.calls != 0 {
+			t.Fatalf("HandleUpdate(%q) fetched alerts: calls=%d", text, alerts.calls)
+		}
+	}
+}
+
+func TestHandleUpdateDeployJokeRejectsNonExactText(t *testing.T) {
+	t.Parallel()
+
+	alerts := &fakeAlerts{}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+
+	for _, text := range []string{"/deploy", "alert-bot deploy", "deploy please"} {
+		if err := service.HandleUpdate(context.Background(), commandUpdate(42, text)); err != nil {
+			t.Fatalf("HandleUpdate(%q) returned error: %v", text, err)
+		}
+	}
+	if len(telegram.sent) != 0 || alerts.calls != 0 {
+		t.Fatalf("non-exact deploy text caused work: calls=%d sent=%#v", alerts.calls, telegram.sent)
+	}
+}
+
+func TestHandleUpdateDeployJokeIgnoresOtherChats(t *testing.T) {
+	t.Parallel()
+
+	alerts := &fakeAlerts{}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+
+	if err := service.HandleUpdate(context.Background(), commandUpdate(7, "deploy")); err != nil {
+		t.Fatalf("HandleUpdate returned error: %v", err)
+	}
+	if len(telegram.sent) != 0 || alerts.calls != 0 {
+		t.Fatalf("non-allowlisted deploy caused work: calls=%d sent=%#v", alerts.calls, telegram.sent)
 	}
 }
 
@@ -99,7 +234,7 @@ func TestHandleUpdateStatusRepliesWithCounts(t *testing.T) {
 	if len(telegram.sent) != 1 {
 		t.Fatalf("unexpected Telegram messages: %#v", telegram.sent)
 	}
-	for _, want := range []string{"Bot: ok", "Alertmanager: ready", "Active tenant-1 alerts: 7", "Active tenant-1 silences: 2"} {
+	for _, want := range []string{"Bot: ok", "Alertmanager: ready", "Active non-zero tenant alerts: 7", "Active non-zero tenant silences: 2"} {
 		if !bytes.Contains([]byte(telegram.sent[0].text), []byte(want)) {
 			t.Fatalf("status reply missing %q: %q", want, telegram.sent[0].text)
 		}
@@ -280,7 +415,7 @@ func TestHandleUpdateSilencesRendersEscapedHTML(t *testing.T) {
 	}
 	got := telegram.sent[0].text
 	for _, want := range []string{
-		"Active silences tenant 1: 1",
+		"Active silences non-zero tenants: 1",
 		"🟥 <b>CRITICAL</b> (1)",
 		"<b>systemd_down</b>",
 		"<blockquote>DOWN | vm&lt;1&gt; | vmagent&lt;noc&gt;.service",
@@ -324,6 +459,40 @@ func TestHandleUpdateSilenceByID(t *testing.T) {
 	}
 	if len(telegram.sent) != 1 || !bytes.Contains([]byte(telegram.sent[0].text), []byte("silence-test-id")) {
 		t.Fatalf("unexpected silence reply: %#v", telegram.sent)
+	}
+}
+
+func TestHandleUpdateSilenceByIDUsesNonZeroTenantView(t *testing.T) {
+	t.Parallel()
+
+	alerts := &fakeAlerts{alerts: []Alert{
+		{
+			Fingerprint: "tenant-zero",
+			Labels: map[string]string{
+				"tenant":    "0",
+				"alertname": "report",
+			},
+		},
+		{
+			Fingerprint: "tenant-four",
+			Labels: map[string]string{
+				"tenant":    "4",
+				"alertname": "scrape_down",
+				"instance":  "node-04",
+			},
+		},
+	}}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+
+	if err := service.HandleUpdate(context.Background(), commandUpdate(42, "/silence tenant-four 10m")); err != nil {
+		t.Fatalf("HandleUpdate returned error: %v", err)
+	}
+	if alerts.activeTenant != TenantNonZero {
+		t.Fatalf("ActiveTenantAlerts tenant=%q want %q", alerts.activeTenant, TenantNonZero)
+	}
+	if alerts.silenceCalls != 1 || alerts.silenced.Fingerprint != "tenant-four" {
+		t.Fatalf("unexpected silence call: calls=%d alert=%#v", alerts.silenceCalls, alerts.silenced)
 	}
 }
 
@@ -396,6 +565,27 @@ func TestHandleUpdateAckByID(t *testing.T) {
 	}
 	if len(telegram.sent) != 1 || !bytes.Contains([]byte(telegram.sent[0].text), []byte("Acked <code>e2b25051ad7705d5</code> for 30m")) {
 		t.Fatalf("unexpected ack reply: %#v", telegram.sent)
+	}
+}
+
+func TestHandleUpdateAckByIDUsesNonZeroTenantView(t *testing.T) {
+	t.Parallel()
+
+	alerts := &fakeAlerts{alerts: []Alert{{
+		Fingerprint: "tenant-four",
+		Labels:      map[string]string{"tenant": "4", "alertname": "scrape_down"},
+	}}}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+
+	if err := service.HandleUpdate(context.Background(), commandUpdate(42, "/ack tenant-four")); err != nil {
+		t.Fatalf("HandleUpdate returned error: %v", err)
+	}
+	if alerts.activeTenant != TenantNonZero {
+		t.Fatalf("ActiveTenantAlerts tenant=%q want %q", alerts.activeTenant, TenantNonZero)
+	}
+	if alerts.silenceCalls != 1 || alerts.silenced.Fingerprint != "tenant-four" || alerts.duration != 30*time.Minute {
+		t.Fatalf("unexpected ack silence call: calls=%d alert=%#v duration=%s", alerts.silenceCalls, alerts.silenced, alerts.duration)
 	}
 }
 
@@ -485,7 +675,7 @@ func TestHandleUpdateSilenceRejectsUnsafeMatchers(t *testing.T) {
 
 	for _, command := range []string{
 		"/silence severity=warning 10m",
-		"/silence instance=node-01,tenant=2 10m",
+		"/silence instance=node-01,tenant=4 10m",
 		"/silence unknown=label 10m",
 	} {
 		if err := service.HandleUpdate(context.Background(), commandUpdate(42, command)); err != nil {
@@ -598,6 +788,7 @@ type fakeAlerts struct {
 	alerts              []Alert
 	err                 error
 	calls               int
+	activeTenant        string
 	status              AlertmanagerStatus
 	statusErr           error
 	statusCalls         int
@@ -629,9 +820,19 @@ type fakeAlerts struct {
 	expireCalls         int
 }
 
-func (f *fakeAlerts) ActiveTenantAlerts(context.Context, string) ([]Alert, error) {
+func (f *fakeAlerts) ActiveTenantAlerts(_ context.Context, tenant string) ([]Alert, error) {
 	f.calls++
-	return f.alerts, f.err
+	f.activeTenant = tenant
+	if f.err != nil {
+		return nil, f.err
+	}
+	filtered := make([]Alert, 0, len(f.alerts))
+	for _, alert := range f.alerts {
+		if alertIncludedInTenantView(alert, tenant) {
+			filtered = append(filtered, alert)
+		}
+	}
+	return filtered, nil
 }
 
 func (f *fakeAlerts) Status(context.Context) (AlertmanagerStatus, error) {
@@ -738,4 +939,13 @@ func testService(alerts AlertSource, telegram Messenger) *Service {
 		MessageLimit:     DefaultTelegramMessageLimit,
 		ExpandableQuotes: true,
 	}
+}
+
+func isDeployJokeReply(text string) bool {
+	for _, joke := range deployJokes {
+		if text == html.EscapeString(joke) {
+			return true
+		}
+	}
+	return false
 }

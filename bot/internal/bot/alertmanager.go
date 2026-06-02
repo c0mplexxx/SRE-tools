@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -90,7 +91,7 @@ func (c *AlertmanagerClient) Status(ctx context.Context) (AlertmanagerStatus, er
 		return AlertmanagerStatus{}, fmt.Errorf("query Alertmanager readiness: unexpected HTTP %s", resp.Status)
 	}
 
-	alerts, err := c.ActiveTenantAlerts(ctx, TenantOne)
+	alerts, err := c.ActiveTenantAlerts(ctx, TenantNonZero)
 	if err != nil {
 		return AlertmanagerStatus{}, err
 	}
@@ -131,7 +132,7 @@ func (c *AlertmanagerClient) ActiveTenantAlerts(ctx context.Context, tenant stri
 
 	filtered := alerts[:0]
 	for _, alert := range alerts {
-		if alert.label("tenant") == tenant && alert.label("kind") != "notify" {
+		if alertIncludedInTenantView(alert, tenant) {
 			filtered = append(filtered, alert)
 		}
 	}
@@ -166,7 +167,7 @@ func (c *AlertmanagerClient) ActiveSilences(ctx context.Context) ([]Alertmanager
 
 	filtered := silences[:0]
 	for _, silence := range silences {
-		if strings.EqualFold(silence.Status.State, "active") && silenceTargetsTenant(silence, TenantOne) {
+		if strings.EqualFold(silence.Status.State, "active") && silenceTargetsNonZeroTenant(silence) {
 			filtered = append(filtered, silence)
 		}
 	}
@@ -178,6 +179,16 @@ func (c *AlertmanagerClient) ActiveSilences(ctx context.Context) ([]Alertmanager
 		return left.ID < right.ID
 	})
 	return filtered, nil
+}
+
+func alertIncludedInTenantView(alert Alert, tenant string) bool {
+	if alert.label("kind") == "notify" {
+		return false
+	}
+	if tenant != TenantNonZero {
+		return alert.label("tenant") == tenant
+	}
+	return isExplicitNonZeroTenant(alert.label("tenant"))
 }
 
 func (c *AlertmanagerClient) SilenceAlert(ctx context.Context, alert Alert, duration time.Duration, createdBy, comment string) (Silence, error) {
@@ -314,29 +325,38 @@ func (c *AlertmanagerClient) ExpireSilence(ctx context.Context, id string) error
 	return nil
 }
 
-func silenceTargetsTenant(silence AlertmanagerSilence, tenant string) bool {
-	foundTenantMatcher := false
+func silenceTargetsNonZeroTenant(silence AlertmanagerSilence) bool {
 	for _, matcher := range silence.Matchers {
-		if matcher.Name != "tenant" {
+		if matcher.Name != "tenant" || !matcher.IsEqual {
 			continue
 		}
-		foundTenantMatcher = true
-		if matcher.IsRegex {
-			matched, err := regexp.MatchString(matcher.Value, tenant)
-			if err != nil {
-				return false
-			}
-			if matcher.IsEqual {
-				return matched
-			}
-			return !matched
+		if matcherTargetsExplicitNonZeroTenant(matcher) {
+			return true
 		}
-		if matcher.IsEqual {
-			return matcher.Value == tenant
-		}
-		return matcher.Value != tenant
 	}
-	return !foundTenantMatcher
+	return false
+}
+
+func matcherTargetsExplicitNonZeroTenant(matcher SilenceMatcher) bool {
+	value := strings.TrimSpace(matcher.Value)
+	if !matcher.IsRegex {
+		return isExplicitNonZeroTenant(value)
+	}
+
+	matchesZero, err := regexp.MatchString(value, TenantZero)
+	if err != nil || matchesZero {
+		return false
+	}
+	for i := 1; i <= 99; i++ {
+		matched, err := regexp.MatchString(value, strconv.Itoa(i))
+		if err != nil {
+			return false
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }
 
 func exactMatchers(labels map[string]string) []SilenceMatcher {
