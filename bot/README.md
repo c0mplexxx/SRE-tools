@@ -26,7 +26,7 @@ dependencies. Run the package build on a Debian/Ubuntu builder with `dpkg-deb`:
 
 ```bash
 cd bot
-VERSION=1.3.0 packaging/deb/build.sh
+VERSION=1.3.1 packaging/deb/build.sh
 ```
 
 If `VERSION` is omitted, the script uses the latest local
@@ -43,7 +43,7 @@ only on `alerts-primary`.
 Install or upgrade:
 
 ```bash
-sudo dpkg -i dist/alert-list-bot_1.3.0-1_amd64.deb
+sudo dpkg -i dist/alert-list-bot_1.3.1-1_amd64.deb
 sudoedit /etc/alert-list-bot/alert-list-bot.env
 sudo systemctl daemon-reload
 sudo systemctl enable --now alert-list-bot.service
@@ -107,10 +107,11 @@ deploy                          random non-mutating deploy joke
 /help                           command help
 ```
 
-`deploy` is a hidden lightweight code word, not a real deploy command. It is
-accepted only as exact text after trim/case normalization, replies with one
-random Russian SRE/DevOps/AntiDDoS joke, and does not call Alertmanager or
-mutate silences.
+`deploy` is a hidden lightweight code word, not a real deploy command. Any
+allowlisted message containing `deploy` as a standalone word replies with one
+random Russian SRE/DevOps/AntiDDoS joke. Embedded words such as `redeploy` or
+`deployment` are ignored. The reply does not call Alertmanager or mutate
+silences.
 
 `/silence` accepts positive durations with `s`, `m`, `h`, `d`, or `month`.
 Examples: `10s`, `10m`, `10h`, `10d`, `1month`. A month is treated as 30 days.

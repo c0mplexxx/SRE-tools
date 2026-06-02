@@ -163,10 +163,10 @@ func TestHandleUpdateDeployJokeRepliesWithoutAlertmanager(t *testing.T) {
 	}
 }
 
-func TestHandleUpdateDeployJokeNormalizesTrimAndCase(t *testing.T) {
+func TestHandleUpdateDeployJokeMatchesStandaloneWord(t *testing.T) {
 	t.Parallel()
 
-	for _, text := range []string{" Deploy ", "DEPLOY"} {
+	for _, text := range []string{" Deploy ", "DEPLOY", "dosgate deploy", "deploy please", "dosgate DEPLOY?", "/deploy"} {
 		alerts := &fakeAlerts{}
 		telegram := &fakeTelegram{}
 		service := testService(alerts, telegram)
@@ -183,20 +183,20 @@ func TestHandleUpdateDeployJokeNormalizesTrimAndCase(t *testing.T) {
 	}
 }
 
-func TestHandleUpdateDeployJokeRejectsNonExactText(t *testing.T) {
+func TestHandleUpdateDeployJokeRejectsEmbeddedText(t *testing.T) {
 	t.Parallel()
 
 	alerts := &fakeAlerts{}
 	telegram := &fakeTelegram{}
 	service := testService(alerts, telegram)
 
-	for _, text := range []string{"/deploy", "alert-bot deploy", "deploy please"} {
+	for _, text := range []string{"redeploy", "deployment", "nodeploy", "deploy_prod"} {
 		if err := service.HandleUpdate(context.Background(), commandUpdate(42, text)); err != nil {
 			t.Fatalf("HandleUpdate(%q) returned error: %v", text, err)
 		}
 	}
 	if len(telegram.sent) != 0 || alerts.calls != 0 {
-		t.Fatalf("non-exact deploy text caused work: calls=%d sent=%#v", alerts.calls, telegram.sent)
+		t.Fatalf("embedded deploy text caused work: calls=%d sent=%#v", alerts.calls, telegram.sent)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type Service struct {
@@ -486,7 +487,14 @@ func parseCheckWindow(value string) (string, error) {
 }
 
 func isDeployJokeIntent(text string) bool {
-	return strings.EqualFold(strings.TrimSpace(text), "deploy")
+	for _, token := range strings.FieldsFunc(text, func(r rune) bool {
+		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_')
+	}) {
+		if strings.EqualFold(token, "deploy") {
+			return true
+		}
+	}
+	return false
 }
 
 func randomDeployJoke() string {
