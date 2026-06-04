@@ -241,6 +241,47 @@ func TestAlertmanagerClientSilenceMatchers(t *testing.T) {
 	}
 }
 
+func TestAlertmanagerClientSilenceMatchersPreservesRegex(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 21, 18, 0, 0, 0, time.FixedZone("MSK", 3*60*60))
+	var payload struct {
+		Matchers []SilenceMatcher `json:"matchers"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v2/silences" {
+			t.Fatalf("unexpected silence request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode silence payload: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"silenceID":"regex-silence-id"}`))
+	}))
+	defer server.Close()
+
+	client := &AlertmanagerClient{
+		BaseURL: server.URL,
+		Client:  server.Client(),
+		Now:     func() time.Time { return now },
+	}
+	_, err := client.SilenceMatchers(context.Background(), []SilenceMatcher{
+		{Name: "tenant", Value: "1", IsEqual: true},
+		{Name: "instance", Value: "^dg-srv.*", IsRegex: true, IsEqual: true},
+	}, time.Hour, "telegram @operator (id 42)", "Silenced from Telegram by labels: instance=~^dg-srv.*,tenant=1")
+	if err != nil {
+		t.Fatalf("SilenceMatchers returned error: %v", err)
+	}
+	if len(payload.Matchers) != 2 {
+		t.Fatalf("unexpected matchers: %#v", payload.Matchers)
+	}
+	if payload.Matchers[0].Name != "instance" || payload.Matchers[0].Value != "^dg-srv.*" || !payload.Matchers[0].IsRegex || !payload.Matchers[0].IsEqual {
+		t.Fatalf("regex matcher was not preserved: %#v", payload.Matchers)
+	}
+	if payload.Matchers[1].Name != "tenant" || payload.Matchers[1].IsRegex || !payload.Matchers[1].IsEqual {
+		t.Fatalf("tenant matcher changed unexpectedly: %#v", payload.Matchers)
+	}
+}
+
 func TestAlertmanagerClientActiveSilences(t *testing.T) {
 	t.Parallel()
 

@@ -123,12 +123,12 @@ func TestHandleUpdateHelpReplies(t *testing.T) {
 			t.Fatalf("help reply contains unsafe angle-bracket example %q: %q", unsafe, telegram.sent[0].text)
 		}
 	}
-	for _, want := range []string{"/status", "/silences", "/check instance range", "node_exporter metrics", "/silence label=value,... duration", "instance=node-01,job=node_exporter", "/ack alert-id", "/unsilence silence-id"} {
+	for _, want := range []string{"/status", "/silences", "/check instance range", "node_exporter metrics", "/silence label=value|label=~regex,... duration", "instance=node-01,job=node_exporter", "/ack alert-id", "/unsilence silence-id"} {
 		if !bytes.Contains([]byte(telegram.sent[0].text), []byte(want)) {
 			t.Fatalf("help reply missing %q: %q", want, telegram.sent[0].text)
 		}
 	}
-	if !bytes.Contains([]byte(telegram.sent[0].text), []byte("deploy - random non-mutating deploy joke")) {
+	if !bytes.Contains([]byte(telegram.sent[0].text), []byte("deploy - probabilistic non-mutating deploy joke")) {
 		t.Fatalf("help reply missing deploy joke code word: %q", telegram.sent[0].text)
 	}
 	if !bytes.Contains([]byte(telegram.sent[0].text), []byte("/coverage instance - alert rule coverage for one instance")) {
@@ -139,12 +139,13 @@ func TestHandleUpdateHelpReplies(t *testing.T) {
 	}
 }
 
-func TestHandleUpdateDeployJokeRepliesWithoutAlertmanager(t *testing.T) {
+func TestHandleUpdateDeployJokeRepliesWhenChanceAllowsWithoutAlertmanager(t *testing.T) {
 	t.Parallel()
 
 	alerts := &fakeAlerts{}
 	telegram := &fakeTelegram{}
 	service := testService(alerts, telegram)
+	service.DeployJokeChance = func() bool { return true }
 
 	if err := service.HandleUpdate(context.Background(), commandUpdate(42, "deploy")); err != nil {
 		t.Fatalf("HandleUpdate returned error: %v", err)
@@ -163,13 +164,35 @@ func TestHandleUpdateDeployJokeRepliesWithoutAlertmanager(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateDeployJokeIgnoredWhenChanceDeniesWithoutAlertmanager(t *testing.T) {
+	t.Parallel()
+
+	alerts := &fakeAlerts{}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+	service.DeployJokeChance = func() bool { return false }
+
+	for _, text := range []string{"deploy", "/id deploy"} {
+		if err := service.HandleUpdate(context.Background(), commandUpdate(42, text)); err != nil {
+			t.Fatalf("HandleUpdate(%q) returned error: %v", text, err)
+		}
+	}
+	if len(telegram.sent) != 0 {
+		t.Fatalf("deploy joke chance denial sent messages: %#v", telegram.sent)
+	}
+	if alerts.calls != 0 || alerts.statusCalls != 0 || alerts.silenceListCalls != 0 || alerts.checkCalls != 0 || alerts.coverageCalls != 0 || alerts.silenceCalls != 0 || alerts.silenceMatcherCalls != 0 || alerts.expireCalls != 0 {
+		t.Fatalf("deploy joke chance denial touched Alertmanager: %#v", alerts)
+	}
+}
+
 func TestHandleUpdateDeployJokeMatchesStandaloneWord(t *testing.T) {
 	t.Parallel()
 
-	for _, text := range []string{" Deploy ", "DEPLOY", "dosgate deploy", "deploy please", "dosgate DEPLOY?", "/deploy"} {
+	for _, text := range []string{" Deploy ", "DEPLOY", "dosgate deploy", "deploy please", "dosgate DEPLOY?", "/deploy", "деплой", "ДЕПЛОЙ", "dosgate деплой?"} {
 		alerts := &fakeAlerts{}
 		telegram := &fakeTelegram{}
 		service := testService(alerts, telegram)
+		service.DeployJokeChance = func() bool { return true }
 
 		if err := service.HandleUpdate(context.Background(), commandUpdate(42, text)); err != nil {
 			t.Fatalf("HandleUpdate(%q) returned error: %v", text, err)
@@ -190,7 +213,7 @@ func TestHandleUpdateDeployJokeRejectsEmbeddedText(t *testing.T) {
 	telegram := &fakeTelegram{}
 	service := testService(alerts, telegram)
 
-	for _, text := range []string{"redeploy", "deployment", "nodeploy", "deploy_prod"} {
+	for _, text := range []string{"redeploy", "deployment", "nodeploy", "deploy_prod", "задеплой", "деплойчик", "node_деплой"} {
 		if err := service.HandleUpdate(context.Background(), commandUpdate(42, text)); err != nil {
 			t.Fatalf("HandleUpdate(%q) returned error: %v", text, err)
 		}
@@ -206,6 +229,7 @@ func TestHandleUpdateDeployJokeIgnoresOtherChats(t *testing.T) {
 	alerts := &fakeAlerts{}
 	telegram := &fakeTelegram{}
 	service := testService(alerts, telegram)
+	service.DeployJokeChance = func() bool { return true }
 
 	if err := service.HandleUpdate(context.Background(), commandUpdate(7, "deploy")); err != nil {
 		t.Fatalf("HandleUpdate returned error: %v", err)
@@ -541,6 +565,42 @@ func TestHandleUpdateSilenceByLabelsAllowsWhitespace(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateSilenceByRegexLabels(t *testing.T) {
+	t.Parallel()
+
+	alerts := &fakeAlerts{}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+
+	if err := service.HandleUpdate(context.Background(), commandUpdate(42, "/silence instance=~^dg-srv.* 2h")); err != nil {
+		t.Fatalf("HandleUpdate returned error: %v", err)
+	}
+	if alerts.silenceMatcherCalls != 1 || alerts.duration != 2*time.Hour {
+		t.Fatalf("unexpected matcher silence call: calls=%d duration=%s", alerts.silenceMatcherCalls, alerts.duration)
+	}
+	if got := formatMatcherExpression(alerts.matchers); got != "instance=~^dg-srv.*,tenant=1" {
+		t.Fatalf("unexpected regex matchers: %s", got)
+	}
+	var sawInstanceRegex, sawTenant bool
+	for _, matcher := range alerts.matchers {
+		switch matcher.Name {
+		case "instance":
+			sawInstanceRegex = matcher.IsEqual && matcher.IsRegex && matcher.Value == "^dg-srv.*"
+		case "tenant":
+			sawTenant = matcher.IsEqual && !matcher.IsRegex && matcher.Value == "1"
+		}
+	}
+	if !sawInstanceRegex || !sawTenant {
+		t.Fatalf("regex/default tenant matchers not preserved: %#v", alerts.matchers)
+	}
+	if alerts.comment != "Silenced from Telegram by labels: instance=~^dg-srv.*,tenant=1" {
+		t.Fatalf("unexpected silence comment: %q", alerts.comment)
+	}
+	if len(telegram.sent) != 1 || !bytes.Contains([]byte(telegram.sent[0].text), []byte("Silenced labels <code>instance=~^dg-srv.*,tenant=1</code>")) {
+		t.Fatalf("unexpected silence reply: %#v", telegram.sent)
+	}
+}
+
 func TestHandleUpdateAckByID(t *testing.T) {
 	t.Parallel()
 
@@ -675,7 +735,8 @@ func TestHandleUpdateSilenceRejectsUnsafeMatchers(t *testing.T) {
 
 	for _, command := range []string{
 		"/silence severity=warning 10m",
-		"/silence instance=node-01,tenant=4 10m",
+		"/silence instance=node-01,tenant=0 10m",
+		"/silence instance=node-01,tenant=~.* 10m",
 		"/silence unknown=label 10m",
 	} {
 		if err := service.HandleUpdate(context.Background(), commandUpdate(42, command)); err != nil {
@@ -685,7 +746,7 @@ func TestHandleUpdateSilenceRejectsUnsafeMatchers(t *testing.T) {
 	if alerts.silenceMatcherCalls != 0 || alerts.silenceCalls != 0 {
 		t.Fatalf("unsafe matcher inputs created a silence: labelCalls=%d idCalls=%d", alerts.silenceMatcherCalls, alerts.silenceCalls)
 	}
-	if len(telegram.sent) != 3 {
+	if len(telegram.sent) != 4 {
 		t.Fatalf("unexpected validation replies: %#v", telegram.sent)
 	}
 	for _, sent := range telegram.sent {
@@ -732,13 +793,45 @@ func TestParseSilenceMatchers(t *testing.T) {
 		t.Fatalf("unexpected matchers: %s", got)
 	}
 
+	matchers, err = parseSilenceMatchers(`job=node_exporter,instance=~^dg-srv.*`)
+	if err != nil {
+		t.Fatalf("parseSilenceMatchers regex returned error: %v", err)
+	}
+	if got := formatMatcherExpression(matchers); got != "instance=~^dg-srv.*,job=node_exporter,tenant=1" {
+		t.Fatalf("unexpected mixed regex matchers: %s", got)
+	}
+	if !matchers[0].IsRegex || !matchers[0].IsEqual {
+		t.Fatalf("regex matcher flags not preserved: %#v", matchers[0])
+	}
+
+	matchers, err = parseSilenceMatchers(`instance=node-01,tenant=4`)
+	if err != nil {
+		t.Fatalf("parseSilenceMatchers explicit non-zero tenant returned error: %v", err)
+	}
+	if got := formatMatcherExpression(matchers); got != "instance=node-01,tenant=4" {
+		t.Fatalf("unexpected explicit tenant matchers: %s", got)
+	}
+
+	matchers, err = parseSilenceMatchers(`instance=node-01,tenant=~^[1-9][0-9]*$`)
+	if err != nil {
+		t.Fatalf("parseSilenceMatchers tenant regex returned error: %v", err)
+	}
+	if got := formatMatcherExpression(matchers); got != "instance=node-01,tenant=~^[1-9][0-9]*$" {
+		t.Fatalf("unexpected tenant regex matchers: %s", got)
+	}
+
 	for _, input := range []string{
 		"",
 		"severity=warning",
-		"instance=node-01,tenant=2",
+		"instance=node-01,tenant=0",
+		"instance=node-01,tenant=~.*",
+		"instance=node-01,tenant=~^0$",
+		"instance=node-01,tenant=~[",
 		"instance=node-01,unknown=value",
 		"instance",
 		"instance=",
+		"instance=~",
+		"instance=~.*",
 	} {
 		if _, err := parseSilenceMatchers(input); err == nil {
 			t.Fatalf("parseSilenceMatchers(%q) unexpectedly succeeded", input)

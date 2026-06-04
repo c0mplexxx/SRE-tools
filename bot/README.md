@@ -99,28 +99,31 @@ Bot API default.
 /check instance range           compact node_exporter metrics for one instance
 /coverage instance              alert rule coverage for one instance
 /silence alert-id duration      silence one current active alert by fingerprint
-/silence label=value,... duration
-                                silence tenant-1 alerts by exact labels
+/silence label=value|label=~regex,... duration
+                                silence non-zero tenant alerts by exact or regex labels
 /ack alert-id                   silence one current active alert for 30m
 /unsilence silence-id           expire one active silence by id
-deploy                          random non-mutating deploy joke
+deploy / деплой                 probabilistic non-mutating deploy joke
 /help                           command help
 ```
 
-`deploy` is a hidden lightweight code word, not a real deploy command. Any
-allowlisted message containing `deploy` as a standalone word replies with one
-random Russian SRE/DevOps/AntiDDoS joke. Embedded words such as `redeploy` or
-`deployment` are ignored. The reply does not call Alertmanager or mutate
-silences.
+`deploy` / `деплой` is a hidden lightweight code word, not a real deploy
+command. Any allowlisted message containing `deploy` or `деплой` as a
+standalone word has a 25% chance to reply with one random Russian
+SRE/DevOps/AntiDDoS joke. Embedded words such as `redeploy`, `deployment`, or
+`деплойчик` are ignored. The reply does not call Alertmanager or mutate
+silences; when the probability gate does not pass, the message is ignored.
 
 `/silence` accepts positive durations with `s`, `m`, `h`, `d`, or `month`.
 Examples: `10s`, `10m`, `10h`, `10d`, `1month`. A month is treated as 30 days.
 The alert id must come from the current `/id` view, which includes explicit
-non-zero tenants. `/silence` also accepts comma-separated exact label matchers,
-for example `/silence instance=node-01,job=node_exporter 2h`; label-based
-silences are still tenant-1 only and tenant is always fixed to `1`. `/ack` uses
-the same id resolution as `/silence alert-id duration` and creates a 30-minute
-exact-label silence.
+non-zero tenants. `/silence` also accepts comma-separated exact and regex label
+matchers, for example `/silence instance=node-01,job=node_exporter 2h` or
+`/silence instance=~^node-.* 2h`. If tenant is omitted, label-based silences keep
+the existing tenant-1 default; explicit tenant matchers must target non-zero
+tenants, and tenant regexes that can match `0` or an empty tenant are rejected.
+`/ack` uses the same id resolution as `/silence alert-id duration` and creates a
+30-minute exact-label silence.
 
 `/check` is read-only and queries the Prometheus-compatible datasource from
 `METRICS_URL_TENANT_1`, which should point at the tenant-1 datasource for the bot
@@ -193,13 +196,15 @@ every label on that selected alert:
 POST http://127.0.0.1:9093/api/v2/silences
 ```
 
-`/silence label=value,... duration` creates a tenant-1 exact-label silence
-without selecting a current alert id. It auto-adds `tenant=1`, rejects
-`tenant!=1`, and accepts only the bounded operator label set used by this stack:
+`/silence label=value,... duration` creates a bounded label-based silence
+without selecting a current alert id. It supports exact `label=value` and regex
+`label=~regex` matchers, auto-adds `tenant=1` when tenant is omitted, rejects
+negative matchers, and accepts only the bounded operator label set used by this stack:
 `alertgroup`, `alertname`, `device`, `domain`, `instance`, `job`, `kind`,
 `mountpoint`, `name`, `service`, `severity`, `tenant`, and `unit`. At least one
 target label such as `instance`, `job`, `alertname`, `unit`, `name`, `service`,
-`device`, or `mountpoint` is required.
+`device`, or `mountpoint` is required. Regexes are compiled before Alertmanager
+POST; target-label regexes that match an empty string are rejected.
 
 `/silences` reads current silences with `GET /api/v2/silences`, keeps active
 silences with an explicit tenant matcher other than `0`, and renders each
@@ -291,13 +296,14 @@ journalctl -u alert-list-bot.service -f
 ```
 
 Then send `/?`, `/id`, `/status`, `/silences`, `/check node-01 1h`,
-`/coverage node-01`, `deploy`, or
+`/coverage node-01`, `deploy`, `деплой`, or
 `/help` from an allowlisted Telegram chat. Use an id from `/id` with
 `/silence alert-id duration` or `/ack alert-id` only when one current
 expendable alert should stop notifying. Use
-`/silence instance=node-01,job=node_exporter 10m` when testing a narrow
-label-based maintenance silence. Use `/unsilence silence-id` only against a
-silence created for the smoke test.
+`/silence instance=node-01,job=node_exporter 10m` or
+`/silence instance=~^node-.* 10m` when testing a narrow label-based maintenance
+silence. Use `/unsilence silence-id` only against a silence created for the smoke
+test.
 Other text and other chat IDs are ignored. If Alertmanager is unavailable, the
 chat gets a short failure message while the service log keeps the detailed
 error. Telegram transport errors redact the bot token before writing to logs.

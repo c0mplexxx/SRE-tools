@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -343,20 +342,11 @@ func matcherTargetsExplicitNonZeroTenant(matcher SilenceMatcher) bool {
 		return isExplicitNonZeroTenant(value)
 	}
 
-	matchesZero, err := regexp.MatchString(value, TenantZero)
-	if err != nil || matchesZero {
+	re, err := regexp.Compile(value)
+	if err != nil || re.MatchString("") || re.MatchString(TenantZero) {
 		return false
 	}
-	for i := 1; i <= 99; i++ {
-		matched, err := regexp.MatchString(value, strconv.Itoa(i))
-		if err != nil {
-			return false
-		}
-		if matched {
-			return true
-		}
-	}
-	return false
+	return true
 }
 
 func exactMatchers(labels map[string]string) []SilenceMatcher {

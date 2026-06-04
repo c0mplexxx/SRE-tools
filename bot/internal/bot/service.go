@@ -20,6 +20,7 @@ type Service struct {
 	Telegram         Messenger
 	AllowedChatIDs   map[int64]struct{}
 	Logger           *log.Logger
+	DeployJokeChance func() bool
 	PollTimeout      time.Duration
 	RetryDelay       time.Duration
 	MessageLimit     int
@@ -76,7 +77,10 @@ func (s *Service) HandleUpdate(ctx context.Context, update Update) error {
 
 	text := strings.TrimSpace(update.Message.Text)
 	if isDeployJokeIntent(text) {
-		return s.Telegram.SendMessage(ctx, chatID, randomDeployJoke())
+		if s.shouldReplyDeployJoke() {
+			return s.Telegram.SendMessage(ctx, chatID, randomDeployJoke())
+		}
+		return nil
 	}
 
 	fields := strings.Fields(text)
@@ -265,7 +269,7 @@ func (s *Service) silenceAlert(ctx context.Context, chatID int64, message *Messa
 func (s *Service) silenceLabelMatchers(ctx context.Context, chatID int64, message *Message, expression string, duration time.Duration) error {
 	matchers, err := parseSilenceMatchers(expression)
 	if err != nil {
-		return s.Telegram.SendMessage(ctx, chatID, "Invalid matchers. Use labels like <code>instance=host,job=node_exporter</code>; tenant is fixed to 1.")
+		return s.Telegram.SendMessage(ctx, chatID, "Invalid matchers. Use labels like <code>instance=host,job=node_exporter</code> or <code>instance=~^node-.*</code>; tenant must be explicit non-zero.")
 	}
 	silence, err := s.Alerts.SilenceMatchers(ctx, matchers, duration, telegramOperator(message), "Silenced from Telegram by labels: "+formatMatcherExpression(matchers))
 	if err != nil {
@@ -380,36 +384,40 @@ func parseSilenceMatchers(expression string) ([]SilenceMatcher, error) {
 		return nil, fmt.Errorf("invalid matcher count")
 	}
 
-	seen := make(map[string]string, len(parts)+1)
+	seen := make(map[string]SilenceMatcher, len(parts)+1)
 	hasTargetMatcher := false
 	for _, part := range parts {
-		name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if !ok {
-			return nil, fmt.Errorf("matcher %q has no equals sign", part)
+		matcher, err := parseSilenceMatcherPart(part)
+		if err != nil {
+			return nil, err
 		}
-		name = strings.TrimSpace(name)
-		value = trimMatcherValue(value)
-		if name == "" || value == "" || !silenceLabelNamePattern.MatchString(name) {
-			return nil, fmt.Errorf("invalid matcher %q", part)
+		if _, ok := allowedSilenceMatcherLabels[matcher.Name]; !ok {
+			return nil, fmt.Errorf("matcher label %q is not allowed", matcher.Name)
 		}
-		if _, ok := allowedSilenceMatcherLabels[name]; !ok {
-			return nil, fmt.Errorf("matcher label %q is not allowed", name)
+		if old, ok := seen[matcher.Name]; ok && !sameSilenceMatcher(old, matcher) {
+			return nil, fmt.Errorf("duplicate matcher label %q", matcher.Name)
 		}
-		if old, ok := seen[name]; ok && old != value {
-			return nil, fmt.Errorf("duplicate matcher label %q", name)
+		if matcher.Name == "tenant" && !matcherTargetsExplicitNonZeroTenant(matcher) {
+			return nil, fmt.Errorf("tenant matcher must target explicit non-zero tenants")
 		}
-		if name == "tenant" && value != TenantOne {
-			return nil, fmt.Errorf("tenant matcher must be %q", TenantOne)
-		}
-		if _, ok := requiredSilenceTargetLabels[name]; ok {
+		if _, ok := requiredSilenceTargetLabels[matcher.Name]; ok {
+			if matcher.IsRegex && regexMatchesEmpty(matcher.Value) {
+				return nil, fmt.Errorf("target matcher %q regex matches empty string", matcher.Name)
+			}
 			hasTargetMatcher = true
 		}
-		seen[name] = value
+		seen[matcher.Name] = matcher
 	}
 	if !hasTargetMatcher {
 		return nil, fmt.Errorf("at least one target matcher is required")
 	}
-	seen["tenant"] = TenantOne
+	if _, ok := seen["tenant"]; !ok {
+		seen["tenant"] = SilenceMatcher{
+			Name:    "tenant",
+			Value:   TenantOne,
+			IsEqual: true,
+		}
+	}
 
 	names := make([]string, 0, len(seen))
 	for name := range seen {
@@ -418,13 +426,55 @@ func parseSilenceMatchers(expression string) ([]SilenceMatcher, error) {
 	sort.Strings(names)
 	matchers := make([]SilenceMatcher, 0, len(names))
 	for _, name := range names {
-		matchers = append(matchers, SilenceMatcher{
-			Name:    name,
-			Value:   seen[name],
-			IsEqual: true,
-		})
+		matchers = append(matchers, seen[name])
 	}
 	return matchers, nil
+}
+
+func parseSilenceMatcherPart(part string) (SilenceMatcher, error) {
+	part = strings.TrimSpace(part)
+	var name, value string
+	isRegex := false
+	if left, right, ok := strings.Cut(part, "=~"); ok {
+		name, value, isRegex = left, right, true
+	} else if left, right, ok := strings.Cut(part, "="); ok {
+		name, value = left, right
+	} else {
+		return SilenceMatcher{}, fmt.Errorf("matcher %q has no supported operator", part)
+	}
+
+	name = strings.TrimSpace(name)
+	value = trimMatcherValue(value)
+	if name == "" || value == "" || !silenceLabelNamePattern.MatchString(name) {
+		return SilenceMatcher{}, fmt.Errorf("invalid matcher %q", part)
+	}
+	matcher := SilenceMatcher{
+		Name:    name,
+		Value:   value,
+		IsRegex: isRegex,
+		IsEqual: true,
+	}
+	if isRegex {
+		if _, err := regexp.Compile(value); err != nil {
+			return SilenceMatcher{}, fmt.Errorf("invalid regex matcher %q: %w", part, err)
+		}
+	}
+	return matcher, nil
+}
+
+func sameSilenceMatcher(left, right SilenceMatcher) bool {
+	return left.Name == right.Name &&
+		left.Value == right.Value &&
+		left.IsRegex == right.IsRegex &&
+		left.IsEqual == right.IsEqual
+}
+
+func regexMatchesEmpty(pattern string) bool {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return true
+	}
+	return re.MatchString("")
 }
 
 func trimMatcherValue(value string) string {
@@ -441,10 +491,14 @@ func trimMatcherValue(value string) string {
 func formatMatcherExpression(matchers []SilenceMatcher) string {
 	parts := make([]string, 0, len(matchers))
 	for _, matcher := range normalizeMatchers(matchers) {
-		if !matcher.IsEqual || matcher.IsRegex {
+		if !matcher.IsEqual {
 			continue
 		}
-		parts = append(parts, matcher.Name+"="+matcher.Value)
+		operator := "="
+		if matcher.IsRegex {
+			operator = "=~"
+		}
+		parts = append(parts, matcher.Name+operator+matcher.Value)
 	}
 	return strings.Join(parts, ",")
 }
@@ -490,11 +544,22 @@ func isDeployJokeIntent(text string) bool {
 	for _, token := range strings.FieldsFunc(text, func(r rune) bool {
 		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_')
 	}) {
-		if strings.EqualFold(token, "deploy") {
+		if strings.EqualFold(token, "deploy") || strings.EqualFold(token, "деплой") {
 			return true
 		}
 	}
 	return false
+}
+
+func (s *Service) shouldReplyDeployJoke() bool {
+	if s.DeployJokeChance != nil {
+		return s.DeployJokeChance()
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(4))
+	if err != nil {
+		return false
+	}
+	return n.Int64() == 0
 }
 
 func randomDeployJoke() string {
@@ -538,9 +603,9 @@ var deployJokes = []string{
 	"Проверка прошла, можно снова делать вид, что это рутина",
 }
 
-const silenceUsage = "Usage: <code>/silence alert-id duration</code>\nOr: <code>/silence instance=host,job=node_exporter duration</code>\nDurations: 10s, 10m, 10h, 10d, 1month."
+const silenceUsage = "Usage: <code>/silence alert-id duration</code>\nOr: <code>/silence instance=host,job=node_exporter duration</code>\nOr: <code>/silence instance=~^node-.* duration</code>\nDurations: 10s, 10m, 10h, 10d, 1month."
 
-const helpMessage = "Commands:\n/? - show active non-zero tenant alerts\n/id - show active non-zero tenant alerts with Alertmanager ids\n/status - show bot and Alertmanager status\n/silences - show active non-zero tenant silences\n/check instance range - compact node_exporter metrics for one instance\n/coverage instance - alert rule coverage for one instance\n/silence alert-id duration - silence one active alert selected by id\n/silence label=value,... duration - silence tenant-1 alerts by labels\n/ack alert-id - silence one active alert for 30m\n/unsilence silence-id - expire one active silence by id\ndeploy - random non-mutating deploy joke\n/help - show this command list\n\nSilence example: /silence instance=node-01,job=node_exporter 2h\nSilence durations: 10s, 10m, 10h, 10d, 1month.\nCheck ranges: 15m, 1h, 1d."
+const helpMessage = "Commands:\n/? - show active non-zero tenant alerts\n/id - show active non-zero tenant alerts with Alertmanager ids\n/status - show bot and Alertmanager status\n/silences - show active non-zero tenant silences\n/check instance range - compact node_exporter metrics for one instance\n/coverage instance - alert rule coverage for one instance\n/silence alert-id duration - silence one active alert selected by id\n/silence label=value|label=~regex,... duration - silence non-zero tenant alerts by labels\n/ack alert-id - silence one active alert for 30m\n/unsilence silence-id - expire one active silence by id\ndeploy - probabilistic non-mutating deploy joke\n/help - show this command list\n\nSilence example: /silence instance=node-01,job=node_exporter 2h\nRegex silence example: /silence instance=~^node-.* 2h\nSilence durations: 10s, 10m, 10h, 10d, 1month.\nCheck ranges: 15m, 1h, 1d."
 
 func telegramOperator(message *Message) string {
 	if message == nil || message.From == nil {
