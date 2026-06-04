@@ -205,6 +205,40 @@ func TestRenderSilenceMessagesUsesAlertLikeBlocks(t *testing.T) {
 	}
 }
 
+func TestRenderSilenceMessagesShowsMatcherOnlySilences(t *testing.T) {
+	setRenderNow(t, mustTime(t, "2026-06-04T21:29:59Z"))
+
+	messages, err := RenderSilenceMessages([]AlertmanagerSilence{{
+		ID:        "7d878d4f-f856-4f93-9c72-47da6642a5eb",
+		EndsAt:    mustTime(t, "2026-06-04T21:30:59Z"),
+		CreatedBy: "telegram @barinov_sp (id 42)",
+		Matchers: []SilenceMatcher{
+			{Name: "tenant", Value: "1", IsEqual: true},
+			{Name: "instance", Value: "^dg-srv.*", IsRegex: true, IsEqual: true},
+		},
+	}}, DefaultTelegramMessageLimit)
+	if err != nil {
+		t.Fatalf("RenderSilenceMessages returned error: %v", err)
+	}
+	got := strings.Join(messages, "")
+	for _, want := range []string{
+		"<b>matcher_silence</b>",
+		"MATCHERS | instance=~^dg-srv.*,tenant=1",
+		"id: <code>7d878d4f-f856-4f93-9c72-47da6642a5eb</code>",
+		"until: 2026-06-04T21:30:59Z (1m left)",
+		"silenced by: @barinov_sp",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("matcher-only silence output missing %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"unknown_alert", "DOWN | ^dg-srv.* | unknown"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("matcher-only silence output leaked %q:\n%s", unwanted, got)
+		}
+	}
+}
+
 func TestRenderSilenceMessagesGroupsNonZeroTenants(t *testing.T) {
 	setRenderNow(t, mustTime(t, "2026-05-20T05:30:00Z"))
 

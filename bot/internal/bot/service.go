@@ -313,17 +313,30 @@ func (s *Service) ackAlert(ctx context.Context, chatID int64, message *Message, 
 
 func (s *Service) unsilence(ctx context.Context, chatID int64, fields []string) error {
 	if len(fields) != 2 {
-		return s.Telegram.SendMessage(ctx, chatID, "Usage: <code>/unsilence silence-id</code>")
+		return s.Telegram.SendMessage(ctx, chatID, "Usage: <code>/unsilence silence-id[,silence-id...]</code>")
 	}
-	id := strings.TrimSpace(fields[1])
-	if id == "" {
-		return s.Telegram.SendMessage(ctx, chatID, "Usage: <code>/unsilence silence-id</code>")
+	ids, err := parseUnsilenceIDs(fields[1])
+	if err != nil {
+		return s.Telegram.SendMessage(ctx, chatID, "Usage: <code>/unsilence silence-id[,silence-id...]</code>")
 	}
-	if err := s.Alerts.ExpireSilence(ctx, id); err != nil {
-		s.logger().Printf("Alertmanager unsilence failed for chat %d silence %s: %v", chatID, id, err)
-		return s.Telegram.SendMessage(ctx, chatID, "Could not expire Alertmanager silence right now.")
+
+	expired := make([]string, 0, len(ids))
+	failed := make([]string, 0)
+	for _, id := range ids {
+		if err := s.Alerts.ExpireSilence(ctx, id); err != nil {
+			s.logger().Printf("Alertmanager unsilence failed for chat %d silence %s: %v", chatID, id, err)
+			failed = append(failed, id)
+			continue
+		}
+		expired = append(expired, id)
 	}
-	return s.Telegram.SendMessage(ctx, chatID, "Expired silence <code>"+html.EscapeString(id)+"</code>.")
+	if len(ids) == 1 {
+		if len(failed) > 0 {
+			return s.Telegram.SendMessage(ctx, chatID, "Could not expire Alertmanager silence right now.")
+		}
+		return s.Telegram.SendMessage(ctx, chatID, "Expired silence <code>"+html.EscapeString(expired[0])+"</code>.")
+	}
+	return s.Telegram.SendMessage(ctx, chatID, renderUnsilenceResult(expired, failed))
 }
 
 var silenceDurationPattern = regexp.MustCompile(`^([1-9][0-9]*)(s|m|h|d|month)$`)
@@ -376,6 +389,41 @@ func parseSilenceDuration(value string) (time.Duration, error) {
 	default:
 		return 0, fmt.Errorf("unsupported silence duration %q", value)
 	}
+}
+
+func parseUnsilenceIDs(value string) ([]string, error) {
+	parts := strings.Split(value, ",")
+	if len(parts) == 0 || len(parts) > 10 {
+		return nil, fmt.Errorf("invalid silence id count")
+	}
+	seen := make(map[string]struct{}, len(parts))
+	ids := make([]string, 0, len(parts))
+	for _, part := range parts {
+		id := strings.TrimSpace(part)
+		if id == "" {
+			return nil, fmt.Errorf("empty silence id")
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("empty silence ids")
+	}
+	return ids, nil
+}
+
+func renderUnsilenceResult(expired, failed []string) string {
+	lines := []string{"Unsilence result:"}
+	if len(expired) > 0 {
+		lines = append(lines, "expired: "+html.EscapeString(strings.Join(expired, ", ")))
+	}
+	if len(failed) > 0 {
+		lines = append(lines, "failed: "+html.EscapeString(strings.Join(failed, ", ")))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func parseSilenceMatchers(expression string) ([]SilenceMatcher, error) {
@@ -605,7 +653,7 @@ var deployJokes = []string{
 
 const silenceUsage = "Usage: <code>/silence alert-id duration</code>\nOr: <code>/silence instance=host,job=node_exporter duration</code>\nOr: <code>/silence instance=~^node-.* duration</code>\nDurations: 10s, 10m, 10h, 10d, 1month."
 
-const helpMessage = "Commands:\n/? - show active non-zero tenant alerts\n/id - show active non-zero tenant alerts with Alertmanager ids\n/status - show bot and Alertmanager status\n/silences - show active non-zero tenant silences\n/check instance range - compact node_exporter metrics for one instance\n/coverage instance - alert rule coverage for one instance\n/silence alert-id duration - silence one active alert selected by id\n/silence label=value|label=~regex,... duration - silence non-zero tenant alerts by labels\n/ack alert-id - silence one active alert for 30m\n/unsilence silence-id - expire one active silence by id\ndeploy - probabilistic non-mutating deploy joke\n/help - show this command list\n\nSilence example: /silence instance=node-01,job=node_exporter 2h\nRegex silence example: /silence instance=~^node-.* 2h\nSilence durations: 10s, 10m, 10h, 10d, 1month.\nCheck ranges: 15m, 1h, 1d."
+const helpMessage = "Commands:\n/? - show active non-zero tenant alerts\n/id - show active non-zero tenant alerts with Alertmanager ids\n/status - show bot and Alertmanager status\n/silences - show active non-zero tenant silences\n/check instance range - compact node_exporter metrics for one instance\n/coverage instance - alert rule coverage for one instance\n/silence alert-id duration - silence one active alert selected by id\n/silence label=value|label=~regex,... duration - silence non-zero tenant alerts by labels\n/ack alert-id - silence one active alert for 30m\n/unsilence silence-id[,silence-id...] - expire active silences by id\ndeploy - probabilistic non-mutating deploy joke\n/help - show this command list\n\nSilence example: /silence instance=node-01,job=node_exporter 2h\nRegex silence example: /silence instance=~^node-.* 2h\nUnsilence example: /unsilence id-one,id-two\nSilence durations: 10s, 10m, 10h, 10d, 1month.\nCheck ranges: 15m, 1h, 1d."
 
 func telegramOperator(message *Message) string {
 	if message == nil || message.From == nil {

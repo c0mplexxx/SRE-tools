@@ -6,6 +6,7 @@ import (
 	"errors"
 	"html"
 	"log"
+	"strings"
 	"testing"
 	"time"
 )
@@ -685,6 +686,32 @@ func TestHandleUpdateUnsilenceExpiresID(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateUnsilenceExpiresCommaSeparatedIDs(t *testing.T) {
+	t.Parallel()
+
+	alerts := &fakeAlerts{}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+
+	if err := service.HandleUpdate(context.Background(), commandUpdate(42, "/unsilence silence-123,silence-456,silence-123")); err != nil {
+		t.Fatalf("HandleUpdate returned error: %v", err)
+	}
+	if alerts.expireCalls != 2 || strings.Join(alerts.expiredIDs, ",") != "silence-123,silence-456" {
+		t.Fatalf("unexpected expire calls: calls=%d ids=%#v", alerts.expireCalls, alerts.expiredIDs)
+	}
+	if len(telegram.sent) != 1 {
+		t.Fatalf("unexpected Telegram messages: %#v", telegram.sent)
+	}
+	for _, want := range []string{
+		"Unsilence result:",
+		"expired: silence-123, silence-456",
+	} {
+		if !bytes.Contains([]byte(telegram.sent[0].text), []byte(want)) {
+			t.Fatalf("unexpected unsilence reply, missing %q: %#v", want, telegram.sent)
+		}
+	}
+}
+
 func TestHandleUpdateUnsilenceFailure(t *testing.T) {
 	t.Parallel()
 
@@ -909,6 +936,7 @@ type fakeAlerts struct {
 	silenceCalls        int
 	silenceMatcherCalls int
 	expiredID           string
+	expiredIDs          []string
 	expireErr           error
 	expireCalls         int
 }
@@ -995,6 +1023,7 @@ func (f *fakeAlerts) SilenceMatchers(_ context.Context, matchers []SilenceMatche
 func (f *fakeAlerts) ExpireSilence(_ context.Context, id string) error {
 	f.expireCalls++
 	f.expiredID = id
+	f.expiredIDs = append(f.expiredIDs, id)
 	return f.expireErr
 }
 

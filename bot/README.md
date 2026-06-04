@@ -102,7 +102,8 @@ Bot API default.
 /silence label=value|label=~regex,... duration
                                 silence non-zero tenant alerts by exact or regex labels
 /ack alert-id                   silence one current active alert for 30m
-/unsilence silence-id           expire one active silence by id
+/unsilence silence-id[,silence-id...]
+                                expire active silences by id
 deploy / деплой                 probabilistic non-mutating deploy joke
 /help                           command help
 ```
@@ -213,7 +214,8 @@ without a tenant matcher are excluded from this view. It keeps only
 operator-useful fields in the body: alert line, silence id, end time with
 compact remaining duration, and short `silenced by`. Silence blocks are rendered as expandable quotes; `scrape_down` and
 `systemd_down` silences without a `severity` matcher are still grouped as
-`CRITICAL`. `/unsilence` accepts only one silence id and expires it with:
+`CRITICAL`. `/unsilence` accepts one silence id or comma-separated silence ids
+and expires each one with:
 
 ```text
 DELETE http://127.0.0.1:9093/api/v2/silence/silence-id
@@ -302,8 +304,8 @@ Then send `/?`, `/id`, `/status`, `/silences`, `/check node-01 1h`,
 expendable alert should stop notifying. Use
 `/silence instance=node-01,job=node_exporter 10m` or
 `/silence instance=~^node-.* 10m` when testing a narrow label-based maintenance
-silence. Use `/unsilence silence-id` only against a silence created for the smoke
-test.
+silence. Use `/unsilence silence-id` or `/unsilence silence-id-1,silence-id-2`
+only against silences created for the smoke test.
 Other text and other chat IDs are ignored. If Alertmanager is unavailable, the
 chat gets a short failure message while the service log keeps the detailed
 error. Telegram transport errors redact the bot token before writing to logs.

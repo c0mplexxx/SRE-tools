@@ -176,7 +176,7 @@ func normalizeSilences(silences []AlertmanagerSilence) []silenceView {
 		alert := silenceAlert(silence)
 		alertname := alert.label("alertname")
 		if alertname == "" {
-			alertname = "unknown_alert"
+			alertname = "matcher_silence"
 		}
 		entity := entityLabel(alert)
 		views = append(views, silenceView{
@@ -265,8 +265,13 @@ func renderSilenceLine(silence AlertmanagerSilence, alert Alert, entity, alertna
 		endsAt = silence.EndsAt.Format("2006-01-02T15:04:05Z07:00") + " (" + timeLeft(silence.EndsAt, renderNow()) + " left)"
 	}
 
+	body := renderBody(alert, entity, alertname)
+	if alert.label("alertname") == "" {
+		body = "MATCHERS | " + html.EscapeString(formatMatcherExpression(silence.Matchers))
+	}
+
 	lines := []string{
-		renderBody(alert, entity, alertname),
+		body,
 		"id: <code>" + html.EscapeString(silenceID(silence)) + "</code>",
 		"until: " + html.EscapeString(endsAt),
 	}
