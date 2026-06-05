@@ -77,7 +77,7 @@ Optional config:
 | --- | --- |
 | `ALERTMANAGER_URL` | `http://127.0.0.1:9093` |
 | `VMALERT_URL_TENANT_1` | `http://127.0.0.1:8881` |
-| `METRICS_URL_TENANT_1` | empty; required for `/check` and generic `/coverage` probes |
+| `METRICS_URL_TENANT_1` | empty; required for `/check`, graph commands, and generic `/coverage` probes |
 | `METRICS_URL_TENANT_0` | empty; reserved for tenant-0 commands such as future traffic checks |
 | `HTTP_TIMEOUT` | `45s` |
 | `TELEGRAM_POLL_TIMEOUT` | `30s` |
@@ -97,6 +97,14 @@ Bot API default.
 /status                         bot and Alertmanager readiness/counts
 /silences                       active non-zero tenant silences
 /check instance range           compact node_exporter metrics for one instance
+/cpu instance range             CPU usage PNG graph for one tenant-1 instance
+/mem instance range             memory usage PNG graph for one tenant-1 instance
+/la instance range              load average PNG graph for one tenant-1 instance
+/space instance range           top filesystem usage PNG graph for one tenant-1 instance
+/swap instance range            swap usage PNG graph for one tenant-1 instance
+/io instance range              top disk busy PNG graph for one tenant-1 instance
+/rx instance range              top receive bit/s PNG graph for one tenant-1 instance
+/tx instance range              top transmit bit/s PNG graph for one tenant-1 instance
 /coverage instance              alert rule coverage for one instance
 /silence alert-id duration      silence one current active alert by fingerprint
 /silence label=value|label=~regex,... duration
@@ -144,6 +152,32 @@ the range, CPU cores, load averages, memory usage, top filesystem usage, top
 disk I/O busy devices, and top receive/transmit network rates.
 Quote bodies with more than four rendered lines use Telegram expandable quotes
 to keep chat output compact.
+
+The graph commands are also read-only and tenant-1 only. They query the same
+`METRICS_URL_TENANT_1` datasource directly and send a PNG through Telegram
+`sendPhoto`; they do not call Grafana APIs and do not touch Alertmanager state.
+Accepted ranges are `1m` through `4w` with `m`, `h`, `d`, or `w` suffixes. The
+bot computes a bounded `query_range` step near 240 points, with a minimum step
+of `15s`, to keep long-range requests predictable:
+
+```text
+/cpu node-01 1h
+/space node-01 1d
+/rx node-01 1w
+```
+
+Graph command behavior:
+
+| Command | Series |
+| --- | --- |
+| `/cpu` | CPU used percent from `node_cpu_seconds_total`. |
+| `/mem` | memory used percent from `MemAvailable / MemTotal`. |
+| `/la` | `node_load1`, `node_load5`, and `node_load15`. |
+| `/space` | top 3 filesystems by current usage, graphed by `mountpoint`. |
+| `/swap` | swap used percent; hosts without swap return a text "no swap data" response. |
+| `/io` | top 3 disk busy devices. |
+| `/rx` | top 3 receive devices in bit/s. |
+| `/tx` | top 3 transmit devices in bit/s. |
 
 `/coverage` is read-only and shows the tenant-1 alertnames whose rules can
 theoretically evaluate for one requested `instance`, even when those alerts are
@@ -232,6 +266,18 @@ GET ${METRICS_URL_TENANT_1}/api/v1/query
 
 It does not call Alertmanager and does not mutate silences.
 
+The graph commands query the same tenant-1 datasource with:
+
+```text
+GET ${METRICS_URL_TENANT_1}/api/v1/query
+GET ${METRICS_URL_TENANT_1}/api/v1/query_range
+```
+
+Instant `query` is used only to choose top filesystems, disks, or network
+devices for `/space`, `/io`, `/rx`, and `/tx`; PNG data comes from
+`query_range`. Graph responses use Telegram `sendPhoto` multipart upload with
+HTML captions.
+
 The `/coverage` command queries the tenant-1 vmalert and metrics datasources
 configured in `VMALERT_URL_TENANT_1` and `METRICS_URL_TENANT_1`:
 
@@ -298,7 +344,7 @@ journalctl -u alert-list-bot.service -f
 ```
 
 Then send `/?`, `/id`, `/status`, `/silences`, `/check node-01 1h`,
-`/coverage node-01`, `deploy`, `деплой`, or
+`/cpu node-01 1h`, `/space node-01 1d`, `/coverage node-01`, `deploy`, `деплой`, or
 `/help` from an allowlisted Telegram chat. Use an id from `/id` with
 `/silence alert-id duration` or `/ack alert-id` only when one current
 expendable alert should stop notifying. Use

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -15,6 +17,7 @@ import (
 type Messenger interface {
 	GetUpdates(context.Context, int, time.Duration) ([]Update, error)
 	SendMessage(context.Context, int64, string) error
+	SendPhoto(context.Context, int64, string, []byte, string) error
 }
 
 type TelegramClient struct {
@@ -97,6 +100,67 @@ func (c *TelegramClient) SendMessage(ctx context.Context, chatID int64, text str
 	}
 	if !result.OK {
 		return fmt.Errorf("send Telegram message: Telegram rejected request: %s", result.Description)
+	}
+	return nil
+}
+
+func (c *TelegramClient) SendPhoto(ctx context.Context, chatID int64, filename string, photo []byte, caption string) error {
+	if len(photo) == 0 {
+		return fmt.Errorf("send Telegram photo: empty photo")
+	}
+	if strings.TrimSpace(filename) == "" {
+		filename = "graph.png"
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("chat_id", strconv.FormatInt(chatID, 10)); err != nil {
+		return fmt.Errorf("build Telegram photo payload: %w", err)
+	}
+	if strings.TrimSpace(caption) != "" {
+		if err := writer.WriteField("caption", caption); err != nil {
+			return fmt.Errorf("build Telegram photo payload: %w", err)
+		}
+		if err := writer.WriteField("parse_mode", "HTML"); err != nil {
+			return fmt.Errorf("build Telegram photo payload: %w", err)
+		}
+	}
+	part, err := writer.CreateFormFile("photo", filename)
+	if err != nil {
+		return fmt.Errorf("build Telegram photo payload: %w", err)
+	}
+	if _, err := io.Copy(part, bytes.NewReader(photo)); err != nil {
+		return fmt.Errorf("build Telegram photo payload: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("build Telegram photo payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.methodURL("sendPhoto").String(), &body)
+	if err != nil {
+		return fmt.Errorf("build Telegram sendPhoto request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return c.requestError("send Telegram photo", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("send Telegram photo: unexpected HTTP %s", resp.Status)
+	}
+
+	var result struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode Telegram sendPhoto response: %w", err)
+	}
+	if !result.OK {
+		return fmt.Errorf("send Telegram photo: Telegram rejected request: %s", result.Description)
 	}
 	return nil
 }

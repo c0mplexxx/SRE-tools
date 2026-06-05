@@ -135,6 +135,9 @@ func TestHandleUpdateHelpReplies(t *testing.T) {
 	if !bytes.Contains([]byte(telegram.sent[0].text), []byte("/coverage instance - alert rule coverage for one instance")) {
 		t.Fatalf("help reply missing coverage command: %q", telegram.sent[0].text)
 	}
+	if !bytes.Contains([]byte(telegram.sent[0].text), []byte("/cpu /mem /la /space /swap /io /rx /tx instance range")) {
+		t.Fatalf("help reply missing graph commands: %q", telegram.sent[0].text)
+	}
 	if alerts.calls != 0 {
 		t.Fatalf("help fetched Alertmanager alerts: calls=%d", alerts.calls)
 	}
@@ -328,6 +331,118 @@ func TestHandleUpdateCheckRejectsInvalidWindow(t *testing.T) {
 	}
 	if len(telegram.sent) != 1 || !bytes.Contains([]byte(telegram.sent[0].text), []byte("Invalid range")) {
 		t.Fatalf("unexpected invalid-window reply: %#v", telegram.sent)
+	}
+}
+
+func TestHandleUpdateGraphSendsPhoto(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	alerts := &fakeAlerts{graph: InstanceGraph{
+		Tenant:   "1",
+		Command:  "/cpu",
+		Title:    "CPU usage",
+		Unit:     graphUnitPercent,
+		Instance: "vm<1>",
+		Range:    GraphRange{Raw: "1h", Duration: time.Hour, Step: 15 * time.Second, Start: now.Add(-time.Hour), End: now},
+		Series: []GraphSeries{{
+			Name: "cpu used",
+			Points: []GraphPoint{
+				{Time: now.Add(-time.Hour), Value: 10, Valid: true},
+				{Time: now.Add(-30 * time.Minute), Value: 30, Valid: true},
+				{Time: now, Value: 20, Valid: true},
+			},
+		}},
+	}}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+
+	if err := service.HandleUpdate(context.Background(), commandUpdate(42, "/cpu vm<1> 1h")); err != nil {
+		t.Fatalf("HandleUpdate returned error: %v", err)
+	}
+	if alerts.graphCalls != 1 || alerts.graphTenant != "1" || alerts.graphCommand != "/cpu" || alerts.graphInstance != "vm<1>" || alerts.graphRange.Raw != "1h" {
+		t.Fatalf("unexpected graph call: calls=%d tenant=%q command=%q instance=%q range=%#v", alerts.graphCalls, alerts.graphTenant, alerts.graphCommand, alerts.graphInstance, alerts.graphRange)
+	}
+	if len(telegram.sent) != 0 {
+		t.Fatalf("graph command sent text message: %#v", telegram.sent)
+	}
+	if len(telegram.photos) != 1 {
+		t.Fatalf("graph command sent photos=%d want 1", len(telegram.photos))
+	}
+	if len(telegram.photos[0].photo) == 0 || !bytes.Contains([]byte(telegram.photos[0].caption), []byte("vm&lt;1&gt;")) {
+		t.Fatalf("unexpected graph photo: %#v", telegram.photos[0])
+	}
+}
+
+func TestHandleUpdateGraphRejectsInvalidRangeWithoutQuery(t *testing.T) {
+	t.Parallel()
+
+	alerts := &fakeAlerts{}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+
+	if err := service.HandleUpdate(context.Background(), commandUpdate(42, "/mem node-01 5w")); err != nil {
+		t.Fatalf("HandleUpdate returned error: %v", err)
+	}
+	if alerts.graphCalls != 0 || alerts.checkCalls != 0 || alerts.calls != 0 {
+		t.Fatalf("invalid graph range queried APIs: graph=%d check=%d alerts=%d", alerts.graphCalls, alerts.checkCalls, alerts.calls)
+	}
+	if len(telegram.sent) != 1 || !bytes.Contains([]byte(telegram.sent[0].text), []byte("Invalid range")) {
+		t.Fatalf("unexpected invalid graph range reply: %#v", telegram.sent)
+	}
+}
+
+func TestHandleUpdateGraphEmptyDatasourceSendsTextOnly(t *testing.T) {
+	t.Parallel()
+
+	alerts := &fakeAlerts{graph: InstanceGraph{EmptyMessage: "No swap data for this instance/range."}}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+
+	if err := service.HandleUpdate(context.Background(), commandUpdate(42, "/swap node-01 1h")); err != nil {
+		t.Fatalf("HandleUpdate returned error: %v", err)
+	}
+	if alerts.graphCalls != 1 {
+		t.Fatalf("GraphInstance calls=%d want 1", alerts.graphCalls)
+	}
+	if len(telegram.photos) != 0 {
+		t.Fatalf("empty graph sent photo: %#v", telegram.photos)
+	}
+	if len(telegram.sent) != 1 || !bytes.Contains([]byte(telegram.sent[0].text), []byte("No swap data")) {
+		t.Fatalf("unexpected empty graph reply: %#v", telegram.sent)
+	}
+}
+
+func TestParseGraphRange(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	tests := map[string]time.Duration{
+		"1m":  time.Minute,
+		"15m": 15 * time.Minute,
+		"1h":  time.Hour,
+		"1d":  24 * time.Hour,
+		"4w":  4 * 7 * 24 * time.Hour,
+	}
+	for input, wantDuration := range tests {
+		got, err := parseGraphRange(input, now)
+		if err != nil {
+			t.Fatalf("parseGraphRange(%q) returned error: %v", input, err)
+		}
+		if got.Raw != input || got.Duration != wantDuration || got.Step <= 0 || got.RateWindow == "" || !got.End.Equal(now) || !got.Start.Equal(now.Add(-wantDuration)) {
+			t.Fatalf("parseGraphRange(%q)=%#v want duration %s", input, got, wantDuration)
+		}
+	}
+	if got, err := parseGraphRange("1h", now); err != nil || got.Step != 15*time.Second {
+		t.Fatalf("parseGraphRange(1h) step=%s err=%v, want 15s", got.Step, err)
+	}
+	if got, err := parseGraphRange("4w", now); err != nil || got.Step != 3*time.Hour {
+		t.Fatalf("parseGraphRange(4w) step=%s err=%v, want 3h", got.Step, err)
+	}
+	for _, input := range []string{"0m", "5w", "1s", "1month", "-1h"} {
+		if _, err := parseGraphRange(input, now); err == nil {
+			t.Fatalf("parseGraphRange(%q) unexpectedly succeeded", input)
+		}
 	}
 }
 
@@ -926,6 +1041,13 @@ type fakeAlerts struct {
 	coverageTenant      string
 	coverageInstance    string
 	coverageCalls       int
+	graph               InstanceGraph
+	graphErr            error
+	graphTenant         string
+	graphCommand        string
+	graphInstance       string
+	graphRange          GraphRange
+	graphCalls          int
 	silence             Silence
 	silenceErr          error
 	silenced            Alert
@@ -996,6 +1118,27 @@ func (f *fakeAlerts) CoverageInstance(_ context.Context, tenant, instance string
 	return f.coverage, f.coverageErr
 }
 
+func (f *fakeAlerts) GraphInstance(_ context.Context, tenant, command, instance string, window GraphRange) (InstanceGraph, error) {
+	f.graphCalls++
+	f.graphTenant = tenant
+	f.graphCommand = command
+	f.graphInstance = instance
+	f.graphRange = window
+	if f.graph.Tenant == "" {
+		f.graph.Tenant = tenant
+	}
+	if f.graph.Command == "" {
+		f.graph.Command = command
+	}
+	if f.graph.Instance == "" {
+		f.graph.Instance = instance
+	}
+	if f.graph.Range.Raw == "" {
+		f.graph.Range = window
+	}
+	return f.graph, f.graphErr
+}
+
 func (f *fakeAlerts) SilenceAlert(_ context.Context, alert Alert, duration time.Duration, createdBy, comment string) (Silence, error) {
 	f.silenceCalls++
 	f.silenced = alert
@@ -1032,8 +1175,16 @@ type sentMessage struct {
 	text   string
 }
 
+type sentPhoto struct {
+	chatID   int64
+	filename string
+	photo    []byte
+	caption  string
+}
+
 type fakeTelegram struct {
-	sent []sentMessage
+	sent   []sentMessage
+	photos []sentPhoto
 }
 
 func (f *fakeTelegram) GetUpdates(context.Context, int, time.Duration) ([]Update, error) {
@@ -1042,6 +1193,11 @@ func (f *fakeTelegram) GetUpdates(context.Context, int, time.Duration) ([]Update
 
 func (f *fakeTelegram) SendMessage(_ context.Context, chatID int64, text string) error {
 	f.sent = append(f.sent, sentMessage{chatID: chatID, text: text})
+	return nil
+}
+
+func (f *fakeTelegram) SendPhoto(_ context.Context, chatID int64, filename string, photo []byte, caption string) error {
+	f.photos = append(f.photos, sentPhoto{chatID: chatID, filename: filename, photo: append([]byte(nil), photo...), caption: caption})
 	return nil
 }
 

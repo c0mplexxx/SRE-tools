@@ -1,6 +1,9 @@
 package bot
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 const (
 	TenantOne                   = "1"
@@ -53,6 +56,37 @@ type InstanceCoverage struct {
 	Tenant     string
 	Instance   string
 	Alertnames []string
+}
+
+type GraphRange struct {
+	Raw        string
+	Duration   time.Duration
+	Step       time.Duration
+	RateWindow string
+	Start      time.Time
+	End        time.Time
+}
+
+type InstanceGraph struct {
+	Tenant       string
+	Command      string
+	Title        string
+	Unit         string
+	Instance     string
+	Range        GraphRange
+	Series       []GraphSeries
+	EmptyMessage string
+}
+
+type GraphSeries struct {
+	Name   string
+	Points []GraphPoint
+}
+
+type GraphPoint struct {
+	Time  time.Time
+	Value float64
+	Valid bool
 }
 
 type MetricValue struct {

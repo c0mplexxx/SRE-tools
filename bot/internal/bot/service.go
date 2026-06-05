@@ -110,6 +110,8 @@ func (s *Service) HandleUpdate(ctx context.Context, update Update) error {
 		return s.replySilences(ctx, chatID)
 	case "/check":
 		return s.replyCheck(ctx, chatID, fields)
+	case "/cpu", "/mem", "/la", "/space", "/swap", "/io", "/rx", "/tx":
+		return s.replyGraph(ctx, chatID, fields)
 	case "/coverage":
 		return s.replyCoverage(ctx, chatID, fields)
 	case "/help":
@@ -126,6 +128,35 @@ func (s *Service) HandleUpdate(ctx context.Context, update Update) error {
 	default:
 		return nil
 	}
+}
+
+func (s *Service) replyGraph(ctx context.Context, chatID int64, fields []string) error {
+	if len(fields) != 3 {
+		return s.Telegram.SendMessage(ctx, chatID, "Usage: <code>"+html.EscapeString(fields[0])+" instance range</code>\nExample: <code>"+html.EscapeString(fields[0])+" node-01 1h</code>")
+	}
+	window, err := parseGraphRange(fields[2], time.Now())
+	if err != nil {
+		return s.Telegram.SendMessage(ctx, chatID, "Invalid range. Use 1m..4w with m, h, d, or w suffixes, for example: 15m, 1h, 1d, 1w.")
+	}
+	graph, err := s.Alerts.GraphInstance(ctx, TenantOne, fields[0], fields[1], window)
+	if err != nil {
+		s.logger().Printf("metrics graph failed for chat %d command %s instance %s window %s: %v", chatID, fields[0], fields[1], window.Raw, err)
+		return s.Telegram.SendMessage(ctx, chatID, "Could not fetch graph metrics right now.")
+	}
+	if graphDataEmpty(graph.Series) {
+		message := strings.TrimSpace(graph.EmptyMessage)
+		if message == "" {
+			message = "No graph data for " + fields[0] + " on this instance/range."
+		}
+		return s.Telegram.SendMessage(ctx, chatID, html.EscapeString(message))
+	}
+	pngBytes, err := RenderGraphPNG(graph)
+	if err != nil {
+		s.logger().Printf("render graph failed for chat %d command %s instance %s window %s: %v", chatID, fields[0], fields[1], window.Raw, err)
+		return s.Telegram.SendMessage(ctx, chatID, "Could not render graph right now.")
+	}
+	filename := strings.TrimPrefix(fields[0], "/") + "-" + sanitizeFilenamePart(fields[1]) + "-" + window.Raw + ".png"
+	return s.Telegram.SendPhoto(ctx, chatID, filename, pngBytes, RenderGraphCaption(graph))
 }
 
 func (s *Service) replyStatus(ctx context.Context, chatID int64) error {
@@ -561,6 +592,7 @@ func alertByID(alerts []Alert, id string) (Alert, bool) {
 }
 
 var checkWindowPattern = regexp.MustCompile(`^([1-9][0-9]*)(m|h|d)$`)
+var graphRangePattern = regexp.MustCompile(`^([1-9][0-9]*)(m|h|d|w)$`)
 
 func parseCheckWindow(value string) (string, error) {
 	match := checkWindowPattern.FindStringSubmatch(value)
@@ -586,6 +618,121 @@ func parseCheckWindow(value string) (string, error) {
 		return "", fmt.Errorf("check window %q outside 1m..24h", value)
 	}
 	return value, nil
+}
+
+func parseGraphRange(value string, now time.Time) (GraphRange, error) {
+	match := graphRangePattern.FindStringSubmatch(value)
+	if match == nil {
+		return GraphRange{}, fmt.Errorf("invalid graph range %q", value)
+	}
+	amount, err := strconv.Atoi(match[1])
+	if err != nil {
+		return GraphRange{}, fmt.Errorf("parse graph range %q: %w", value, err)
+	}
+	var duration time.Duration
+	switch match[2] {
+	case "m":
+		duration = time.Duration(amount) * time.Minute
+	case "h":
+		duration = time.Duration(amount) * time.Hour
+	case "d":
+		duration = time.Duration(amount) * 24 * time.Hour
+	case "w":
+		duration = time.Duration(amount) * 7 * 24 * time.Hour
+	default:
+		return GraphRange{}, fmt.Errorf("unsupported graph range %q", value)
+	}
+	if duration < time.Minute || duration > 4*7*24*time.Hour {
+		return GraphRange{}, fmt.Errorf("graph range %q outside 1m..4w", value)
+	}
+	step := graphStep(duration)
+	rateWindow := step * 4
+	if rateWindow < time.Minute {
+		rateWindow = time.Minute
+	}
+	if rateWindow > time.Hour {
+		rateWindow = time.Hour
+	}
+	return GraphRange{
+		Raw:        value,
+		Duration:   duration,
+		Step:       step,
+		RateWindow: prometheusDuration(rateWindow),
+		Start:      now.Add(-duration),
+		End:        now,
+	}, nil
+}
+
+func graphStep(duration time.Duration) time.Duration {
+	target := duration / 240
+	steps := []time.Duration{
+		15 * time.Second,
+		30 * time.Second,
+		time.Minute,
+		2 * time.Minute,
+		5 * time.Minute,
+		10 * time.Minute,
+		15 * time.Minute,
+		30 * time.Minute,
+		time.Hour,
+		2 * time.Hour,
+		3 * time.Hour,
+		6 * time.Hour,
+	}
+	for _, step := range steps {
+		if target <= step {
+			return step
+		}
+	}
+	return 6 * time.Hour
+}
+
+func prometheusDuration(duration time.Duration) string {
+	if duration%(7*24*time.Hour) == 0 {
+		return strconv.Itoa(int(duration/(7*24*time.Hour))) + "w"
+	}
+	if duration%(24*time.Hour) == 0 {
+		return strconv.Itoa(int(duration/(24*time.Hour))) + "d"
+	}
+	if duration%time.Hour == 0 {
+		return strconv.Itoa(int(duration/time.Hour)) + "h"
+	}
+	if duration%time.Minute == 0 {
+		return strconv.Itoa(int(duration/time.Minute)) + "m"
+	}
+	return strconv.Itoa(int(duration/time.Second)) + "s"
+}
+
+func graphDataEmpty(series []GraphSeries) bool {
+	for _, item := range series {
+		for _, point := range item.Points {
+			if point.Valid {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func sanitizeFilenamePart(value string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(value) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+		if b.Len() >= 48 {
+			break
+		}
+	}
+	if b.Len() == 0 {
+		return "instance"
+	}
+	return b.String()
 }
 
 func isDeployJokeIntent(text string) bool {
@@ -653,7 +800,7 @@ var deployJokes = []string{
 
 const silenceUsage = "Usage: <code>/silence alert-id duration</code>\nOr: <code>/silence instance=host,job=node_exporter duration</code>\nOr: <code>/silence instance=~^node-.* duration</code>\nDurations: 10s, 10m, 10h, 10d, 1month."
 
-const helpMessage = "Commands:\n/? - show active non-zero tenant alerts\n/id - show active non-zero tenant alerts with Alertmanager ids\n/status - show bot and Alertmanager status\n/silences - show active non-zero tenant silences\n/check instance range - compact node_exporter metrics for one instance\n/coverage instance - alert rule coverage for one instance\n/silence alert-id duration - silence one active alert selected by id\n/silence label=value|label=~regex,... duration - silence non-zero tenant alerts by labels\n/ack alert-id - silence one active alert for 30m\n/unsilence silence-id[,silence-id...] - expire active silences by id\ndeploy - probabilistic non-mutating deploy joke\n/help - show this command list\n\nSilence example: /silence instance=node-01,job=node_exporter 2h\nRegex silence example: /silence instance=~^node-.* 2h\nUnsilence example: /unsilence id-one,id-two\nSilence durations: 10s, 10m, 10h, 10d, 1month.\nCheck ranges: 15m, 1h, 1d."
+const helpMessage = "Commands:\n/? - show active non-zero tenant alerts\n/id - show active non-zero tenant alerts with Alertmanager ids\n/status - show bot and Alertmanager status\n/silences - show active non-zero tenant silences\n/check instance range - compact node_exporter metrics for one instance\n/cpu /mem /la /space /swap /io /rx /tx instance range - tenant-1 node_exporter graphs\n/coverage instance - alert rule coverage for one instance\n/silence alert-id duration - silence one active alert selected by id\n/silence label=value|label=~regex,... duration - silence non-zero tenant alerts by labels\n/ack alert-id - silence one active alert for 30m\n/unsilence silence-id[,silence-id...] - expire active silences by id\ndeploy - probabilistic non-mutating deploy joke\n/help - show this command list\n\nSilence example: /silence instance=node-01,job=node_exporter 2h\nRegex silence example: /silence instance=~^node-.* 2h\nUnsilence example: /unsilence id-one,id-two\nSilence durations: 10s, 10m, 10h, 10d, 1month.\nCheck ranges: 15m, 1h, 1d.\nGraph ranges: 15m, 1h, 1d, 1w, up to 4w."
 
 func telegramOperator(message *Message) string {
 	if message == nil || message.From == nil {

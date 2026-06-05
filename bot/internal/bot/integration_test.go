@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -89,6 +90,59 @@ func TestHTTPClientsLargeReplySmoke(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(messages, ""), "ignore") {
 		t.Fatalf("tenant-0 alert leaked into reply: %q", messages)
+	}
+}
+
+func TestTelegramClientSendPhotoMultipart(t *testing.T) {
+	t.Parallel()
+
+	var sawPhoto bool
+	telegram := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/sendPhoto") {
+			t.Fatalf("unexpected Telegram path %s", r.URL.Path)
+		}
+		if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data;") {
+			t.Fatalf("unexpected Content-Type %q", r.Header.Get("Content-Type"))
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm: %v", err)
+		}
+		if got := r.FormValue("chat_id"); got != "42" {
+			t.Fatalf("chat_id=%q want 42", got)
+		}
+		if got := r.FormValue("caption"); got != "<b>CPU</b>" {
+			t.Fatalf("caption=%q want HTML caption", got)
+		}
+		if got := r.FormValue("parse_mode"); got != "HTML" {
+			t.Fatalf("parse_mode=%q want HTML", got)
+		}
+		file, header, err := r.FormFile("photo")
+		if err != nil {
+			t.Fatalf("photo form file missing: %v", err)
+		}
+		defer file.Close()
+		body, err := io.ReadAll(file)
+		if err != nil {
+			t.Fatalf("read photo: %v", err)
+		}
+		if header.Filename != "graph.png" || string(body) != "png-bytes" {
+			t.Fatalf("unexpected photo upload filename=%q body=%q", header.Filename, string(body))
+		}
+		sawPhoto = true
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{}})
+	}))
+	defer telegram.Close()
+
+	client := &TelegramClient{
+		APIBaseURL: telegram.URL,
+		Token:      "test-token",
+		Client:     telegram.Client(),
+	}
+	if err := client.SendPhoto(context.Background(), 42, "graph.png", []byte("png-bytes"), "<b>CPU</b>"); err != nil {
+		t.Fatalf("SendPhoto returned error: %v", err)
+	}
+	if !sawPhoto {
+		t.Fatal("sendPhoto request was not observed")
 	}
 }
 

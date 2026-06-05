@@ -19,6 +19,7 @@ type AlertSource interface {
 	ActiveSilences(context.Context) ([]AlertmanagerSilence, error)
 	CheckInstance(context.Context, string, string, string) (InstanceCheck, error)
 	CoverageInstance(context.Context, string, string) (InstanceCoverage, error)
+	GraphInstance(context.Context, string, string, string, GraphRange) (InstanceGraph, error)
 	SilenceAlert(context.Context, Alert, time.Duration, string, string) (Silence, error)
 	SilenceMatchers(context.Context, []SilenceMatcher, time.Duration, string, string) (Silence, error)
 	ExpireSilence(context.Context, string) error
