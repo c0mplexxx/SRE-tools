@@ -118,7 +118,7 @@ func (c *AlertmanagerClient) queryNamed(ctx context.Context, baseURL, query stri
 		if name == "" {
 			name = "unknown"
 		}
-		values = append(values, MetricValue{Name: name, Value: value})
+		values = append(values, MetricValue{Name: name, Value: value, Labels: copyLabels(sample.Metric)})
 	}
 	sort.SliceStable(values, func(i, j int) bool {
 		if values[i].Value != values[j].Value {
@@ -188,4 +188,15 @@ func firstMetricLabel(metric map[string]string, labels ...string) string {
 		}
 	}
 	return ""
+}
+
+func copyLabels(labels map[string]string) map[string]string {
+	if len(labels) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(labels))
+	for key, value := range labels {
+		out[key] = value
+	}
+	return out
 }

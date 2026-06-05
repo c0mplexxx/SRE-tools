@@ -97,14 +97,14 @@ Bot API default.
 /status                         bot and Alertmanager readiness/counts
 /silences                       active non-zero tenant silences
 /check instance range           compact node_exporter metrics for one instance
-/cpu instance range             CPU usage PNG graph for one tenant-1 instance
-/mem instance range             memory usage PNG graph for one tenant-1 instance
-/la instance range              load average PNG graph for one tenant-1 instance
-/space instance range           top filesystem usage PNG graph for one tenant-1 instance
-/swap instance range            swap usage PNG graph for one tenant-1 instance
-/io instance range              top disk busy PNG graph for one tenant-1 instance
-/rx instance range              top receive bit/s PNG graph for one tenant-1 instance
-/tx instance range              top transmit bit/s PNG graph for one tenant-1 instance
+/cpu target range               CPU usage PNG graph for tenant-1 target
+/mem target range               memory usage PNG graph for tenant-1 target
+/la target range                load average PNG graph for tenant-1 target
+/space target range             top filesystem usage PNG graph for tenant-1 target
+/swap target range              swap usage PNG graph for tenant-1 target
+/io target range                top disk busy PNG graph for tenant-1 target
+/rx target range                top receive bit/s PNG graph for tenant-1 target
+/tx target range                top transmit bit/s PNG graph for tenant-1 target
 /coverage instance              alert rule coverage for one instance
 /silence alert-id duration      silence one current active alert by fingerprint
 /silence label=value|label=~regex,... duration
@@ -162,22 +162,36 @@ of `15s`, to keep long-range requests predictable:
 
 ```text
 /cpu node-01 1h
+/space node-group.* 12h
 /space node-01 1d
 /rx node-01 1w
 ```
+
+Graph targets are either exact instance labels or bare regular expressions. A
+target without regex metacharacters, such as `node-01`, becomes
+`instance="node-01"`. A target with regex metacharacters, such as
+`node-group.*`, becomes `instance=~"node-group.*"`. Regex graph rendering is
+hard-capped at 6 matched hosts; if the regex matches more hosts, the bot returns
+a text error asking for a narrower regex.
 
 Graph command behavior:
 
 | Command | Series |
 | --- | --- |
-| `/cpu` | CPU used percent from `node_cpu_seconds_total`. |
-| `/mem` | memory used percent from `MemAvailable / MemTotal`. |
-| `/la` | `node_load1`, `node_load5`, and `node_load15`. |
-| `/space` | top 3 filesystems by current usage, graphed by `mountpoint`. |
-| `/swap` | swap used percent; hosts without swap return a text "no swap data" response. |
-| `/io` | top 3 disk busy devices. |
-| `/rx` | top 3 receive devices in bit/s. |
-| `/tx` | top 3 transmit devices in bit/s. |
+| `/cpu` | exact: one CPU used series; regex: one CPU used series per matched instance. |
+| `/mem` | exact: one memory used series; regex: one memory used series per matched instance. |
+| `/la` | exact: `node_load1`, `node_load5`, and `node_load15`; regex: `node_load5` per matched instance. |
+| `/space` | exact: top 3 filesystems by current usage; regex: top 6 combined `instance / mountpoint` series. |
+| `/swap` | exact: one swap used series; regex: one swap used series per matched instance; hosts without swap return a text "no swap data" response. |
+| `/io` | exact: top 3 disk busy devices; regex: top 6 combined `instance / device` series. |
+| `/rx` | exact: top 3 receive devices in bit/s; regex: top 6 combined `instance / device` series. |
+| `/tx` | exact: top 3 transmit devices in bit/s; regex: top 6 combined `instance / device` series. |
+
+Regex captions include the regex marker and matched host count, for example:
+
+```text
+Filesystem usage tenant 1 | /node-group.*/ | 12h | 2 hosts
+```
 
 `/coverage` is read-only and shows the tenant-1 alertnames whose rules can
 theoretically evaluate for one requested `instance`, even when those alerts are
@@ -344,8 +358,9 @@ journalctl -u alert-list-bot.service -f
 ```
 
 Then send `/?`, `/id`, `/status`, `/silences`, `/check node-01 1h`,
-`/cpu node-01 1h`, `/space node-01 1d`, `/coverage node-01`, `deploy`, `деплой`, or
-`/help` from an allowlisted Telegram chat. Use an id from `/id` with
+`/space node-01 12h`, `/space node-group.* 12h`, `/cpu node-group.* 1h`,
+`/coverage node-01`, `deploy`, `деплой`, or `/help` from an allowlisted
+Telegram chat. Use an id from `/id` with
 `/silence alert-id duration` or `/ack alert-id` only when one current
 expendable alert should stop notifying. Use
 `/silence instance=node-01,job=node_exporter 10m` or

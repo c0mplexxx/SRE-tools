@@ -41,13 +41,18 @@ func RenderGraphCaption(graph InstanceGraph) string {
 	if title == "" {
 		title = command
 	}
-	return fmt.Sprintf(
+	target := graphTargetDisplay(graph)
+	caption := fmt.Sprintf(
 		"<b>%s</b> tenant <code>%s</code> | <code>%s</code> | <code>%s</code>",
 		html.EscapeString(title),
 		html.EscapeString(tenant),
-		html.EscapeString(graph.Instance),
+		html.EscapeString(target),
 		html.EscapeString(graph.Range.Raw),
 	)
+	if graph.Target.Regex {
+		caption += fmt.Sprintf(" | %d hosts", len(graph.Target.Hosts))
+	}
+	return caption
 }
 
 func RenderGraphPNG(graph InstanceGraph) ([]byte, error) {
@@ -65,7 +70,7 @@ func RenderGraphPNG(graph InstanceGraph) ([]byte, error) {
 	yMin, yMax := graphYRange(graph)
 	drawGrid(img, plot, yMin, yMax, graph.Unit)
 	drawText(img, 24, 18, strings.ToUpper(strings.TrimSpace(graph.Title)), color.RGBA{R: 232, G: 235, B: 241, A: 255}, 2)
-	subtitle := strings.ToUpper(strings.TrimSpace(graph.Instance) + " | " + strings.TrimSpace(graph.Range.Raw) + " | STEP " + prometheusDuration(graph.Range.Step))
+	subtitle := strings.ToUpper(graphTargetDisplay(graph) + " | " + strings.TrimSpace(graph.Range.Raw) + " | STEP " + prometheusDuration(graph.Range.Step))
 	drawText(img, 24, 42, subtitle, color.RGBA{R: 145, G: 155, B: 171, A: 255}, 1)
 
 	for i, series := range sortedGraphSeries(graph.Series) {
@@ -79,6 +84,16 @@ func RenderGraphPNG(graph InstanceGraph) ([]byte, error) {
 		return nil, fmt.Errorf("encode graph PNG: %w", err)
 	}
 	return out.Bytes(), nil
+}
+
+func graphTargetDisplay(graph InstanceGraph) string {
+	if graph.Target.Raw != "" {
+		if graph.Target.Regex {
+			return "/" + graph.Target.Raw + "/"
+		}
+		return graph.Target.Raw
+	}
+	return strings.TrimSpace(graph.Instance)
 }
 
 func graphYRange(graph InstanceGraph) (float64, float64) {

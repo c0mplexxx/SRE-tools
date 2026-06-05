@@ -135,7 +135,7 @@ func TestHandleUpdateHelpReplies(t *testing.T) {
 	if !bytes.Contains([]byte(telegram.sent[0].text), []byte("/coverage instance - alert rule coverage for one instance")) {
 		t.Fatalf("help reply missing coverage command: %q", telegram.sent[0].text)
 	}
-	if !bytes.Contains([]byte(telegram.sent[0].text), []byte("/cpu /mem /la /space /swap /io /rx /tx instance range")) {
+	if !bytes.Contains([]byte(telegram.sent[0].text), []byte("/cpu /mem /la /space /swap /io /rx /tx target range")) {
 		t.Fatalf("help reply missing graph commands: %q", telegram.sent[0].text)
 	}
 	if alerts.calls != 0 {
@@ -410,6 +410,24 @@ func TestHandleUpdateGraphEmptyDatasourceSendsTextOnly(t *testing.T) {
 	}
 	if len(telegram.sent) != 1 || !bytes.Contains([]byte(telegram.sent[0].text), []byte("No swap data")) {
 		t.Fatalf("unexpected empty graph reply: %#v", telegram.sent)
+	}
+}
+
+func TestHandleUpdateGraphOperatorErrorSendsText(t *testing.T) {
+	t.Parallel()
+
+	alerts := &fakeAlerts{graphErr: operatorCommandError{Message: "Regex /node-.*/ matched 7 hosts; narrow the regex to 6 or fewer hosts."}}
+	telegram := &fakeTelegram{}
+	service := testService(alerts, telegram)
+
+	if err := service.HandleUpdate(context.Background(), commandUpdate(42, "/cpu node-.* 1h")); err != nil {
+		t.Fatalf("HandleUpdate returned error: %v", err)
+	}
+	if len(telegram.photos) != 0 {
+		t.Fatalf("operator error sent photo: %#v", telegram.photos)
+	}
+	if len(telegram.sent) != 1 || !bytes.Contains([]byte(telegram.sent[0].text), []byte("narrow the regex")) {
+		t.Fatalf("unexpected operator error reply: %#v", telegram.sent)
 	}
 }
 

@@ -132,7 +132,7 @@ func (s *Service) HandleUpdate(ctx context.Context, update Update) error {
 
 func (s *Service) replyGraph(ctx context.Context, chatID int64, fields []string) error {
 	if len(fields) != 3 {
-		return s.Telegram.SendMessage(ctx, chatID, "Usage: <code>"+html.EscapeString(fields[0])+" instance range</code>\nExample: <code>"+html.EscapeString(fields[0])+" node-01 1h</code>")
+		return s.Telegram.SendMessage(ctx, chatID, "Usage: <code>"+html.EscapeString(fields[0])+" target range</code>\nExamples: <code>"+html.EscapeString(fields[0])+" node-01 1h</code>, <code>"+html.EscapeString(fields[0])+" node-.* 12h</code>")
 	}
 	window, err := parseGraphRange(fields[2], time.Now())
 	if err != nil {
@@ -140,6 +140,9 @@ func (s *Service) replyGraph(ctx context.Context, chatID int64, fields []string)
 	}
 	graph, err := s.Alerts.GraphInstance(ctx, TenantOne, fields[0], fields[1], window)
 	if err != nil {
+		if message, ok := operatorCommandErrorMessage(err); ok {
+			return s.Telegram.SendMessage(ctx, chatID, html.EscapeString(message))
+		}
 		s.logger().Printf("metrics graph failed for chat %d command %s instance %s window %s: %v", chatID, fields[0], fields[1], window.Raw, err)
 		return s.Telegram.SendMessage(ctx, chatID, "Could not fetch graph metrics right now.")
 	}
@@ -800,7 +803,7 @@ var deployJokes = []string{
 
 const silenceUsage = "Usage: <code>/silence alert-id duration</code>\nOr: <code>/silence instance=host,job=node_exporter duration</code>\nOr: <code>/silence instance=~^node-.* duration</code>\nDurations: 10s, 10m, 10h, 10d, 1month."
 
-const helpMessage = "Commands:\n/? - show active non-zero tenant alerts\n/id - show active non-zero tenant alerts with Alertmanager ids\n/status - show bot and Alertmanager status\n/silences - show active non-zero tenant silences\n/check instance range - compact node_exporter metrics for one instance\n/cpu /mem /la /space /swap /io /rx /tx instance range - tenant-1 node_exporter graphs\n/coverage instance - alert rule coverage for one instance\n/silence alert-id duration - silence one active alert selected by id\n/silence label=value|label=~regex,... duration - silence non-zero tenant alerts by labels\n/ack alert-id - silence one active alert for 30m\n/unsilence silence-id[,silence-id...] - expire active silences by id\ndeploy - probabilistic non-mutating deploy joke\n/help - show this command list\n\nSilence example: /silence instance=node-01,job=node_exporter 2h\nRegex silence example: /silence instance=~^node-.* 2h\nUnsilence example: /unsilence id-one,id-two\nSilence durations: 10s, 10m, 10h, 10d, 1month.\nCheck ranges: 15m, 1h, 1d.\nGraph ranges: 15m, 1h, 1d, 1w, up to 4w."
+const helpMessage = "Commands:\n/? - show active non-zero tenant alerts\n/id - show active non-zero tenant alerts with Alertmanager ids\n/status - show bot and Alertmanager status\n/silences - show active non-zero tenant silences\n/check instance range - compact node_exporter metrics for one instance\n/cpu /mem /la /space /swap /io /rx /tx target range - tenant-1 node_exporter graphs\n/coverage instance - alert rule coverage for one instance\n/silence alert-id duration - silence one active alert selected by id\n/silence label=value|label=~regex,... duration - silence non-zero tenant alerts by labels\n/ack alert-id - silence one active alert for 30m\n/unsilence silence-id[,silence-id...] - expire active silences by id\ndeploy - probabilistic non-mutating deploy joke\n/help - show this command list\n\nGraph examples: /space node-01 1h, /space node-.* 12h\nSilence example: /silence instance=node-01,job=node_exporter 2h\nRegex silence example: /silence instance=~^node-.* 2h\nUnsilence example: /unsilence id-one,id-two\nSilence durations: 10s, 10m, 10h, 10d, 1month.\nCheck ranges: 15m, 1h, 1d.\nGraph ranges: 15m, 1h, 1d, 1w, up to 4w."
 
 func telegramOperator(message *Message) string {
 	if message == nil || message.From == nil {

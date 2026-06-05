@@ -7,6 +7,8 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,7 +18,11 @@ const (
 	graphUnitPercent = "%"
 	graphUnitLoad    = "load"
 	graphUnitBits    = "bit/s"
+
+	DefaultGraphRegexHostLimit = 6
 )
+
+var graphRegexMetaPattern = regexp.MustCompile(`[\\.\+\*\?\^\$\[\]\(\)\{\}\|]`)
 
 type prometheusRangeQueryResponse struct {
 	Status string `json:"status"`
@@ -37,15 +43,36 @@ type graphRangeQuery struct {
 	FixedName string
 }
 
-func (c *AlertmanagerClient) GraphInstance(ctx context.Context, tenant, command, instance string, window GraphRange) (InstanceGraph, error) {
+type operatorCommandError struct {
+	Message string
+}
+
+func (e operatorCommandError) Error() string {
+	return e.Message
+}
+
+func operatorCommandErrorMessage(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	if typed, ok := err.(operatorCommandError); ok {
+		return typed.Message, true
+	}
+	if typed, ok := err.(*operatorCommandError); ok {
+		return typed.Message, true
+	}
+	return "", false
+}
+
+func (c *AlertmanagerClient) GraphInstance(ctx context.Context, tenant, command, targetRaw string, window GraphRange) (InstanceGraph, error) {
 	tenant = strings.TrimSpace(tenant)
 	command = strings.TrimSpace(command)
-	instance = strings.TrimSpace(instance)
+	target, err := parseGraphTarget(targetRaw)
+	if err != nil {
+		return InstanceGraph{}, err
+	}
 	if tenant == "" {
 		return InstanceGraph{}, fmt.Errorf("tenant is required")
-	}
-	if instance == "" {
-		return InstanceGraph{}, fmt.Errorf("instance is required")
 	}
 	if window.Duration <= 0 || window.Step <= 0 {
 		return InstanceGraph{}, fmt.Errorf("graph range is required")
@@ -64,7 +91,12 @@ func (c *AlertmanagerClient) GraphInstance(ctx context.Context, tenant, command,
 		window.RateWindow = prometheusDuration(maxDuration(time.Minute, minDuration(time.Hour, window.Step*4)))
 	}
 
-	queries, graph, err := graphQueries(command, instance, window, func(query string, labels ...string) ([]MetricValue, error) {
+	target, err = c.resolveGraphTarget(ctx, baseURL, target)
+	if err != nil {
+		return InstanceGraph{}, err
+	}
+
+	queries, graph, err := graphQueries(command, target, window, func(query string, labels ...string) ([]MetricValue, error) {
 		return c.queryNamed(ctx, baseURL, query, labels...)
 	})
 	if err != nil {
@@ -72,8 +104,12 @@ func (c *AlertmanagerClient) GraphInstance(ctx context.Context, tenant, command,
 	}
 	graph.Tenant = tenant
 	graph.Command = command
-	graph.Instance = instance
+	graph.Instance = target.Raw
+	graph.Target = target
 	graph.Range = window
+	if graph.EmptyMessage == "" {
+		graph.EmptyMessage = graphEmptyMessage(graph.Title, target, window)
+	}
 
 	for _, query := range queries {
 		series, err := c.queryRange(ctx, baseURL, query.Query, window)
@@ -85,60 +121,151 @@ func (c *AlertmanagerClient) GraphInstance(ctx context.Context, tenant, command,
 	return graph, nil
 }
 
-func graphQueries(command, instance string, window GraphRange, top func(string, ...string) ([]MetricValue, error)) ([]graphRangeQuery, InstanceGraph, error) {
-	selector := strconv.Quote(instance)
+func parseGraphTarget(value string) (GraphTarget, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return GraphTarget{}, operatorCommandError{Message: "Graph target is required."}
+	}
+	target := GraphTarget{Raw: value, HostCap: DefaultGraphRegexHostLimit}
+	if !graphRegexMetaPattern.MatchString(value) {
+		target.Matcher = `instance=` + strconv.Quote(value)
+		return target, nil
+	}
+	if _, err := regexp.Compile(value); err != nil {
+		return GraphTarget{}, operatorCommandError{Message: "Invalid instance regex " + strconv.Quote(value) + ". Fix the regex or use an exact instance name."}
+	}
+	target.Regex = true
+	target.Matcher = `instance=~` + strconv.Quote(value)
+	return target, nil
+}
+
+func (c *AlertmanagerClient) resolveGraphTarget(ctx context.Context, baseURL string, target GraphTarget) (GraphTarget, error) {
+	if !target.Regex {
+		return target, nil
+	}
+	hostCap := target.HostCap
+	if hostCap <= 0 {
+		hostCap = DefaultGraphRegexHostLimit
+		target.HostCap = hostCap
+	}
+	values, err := c.queryNamed(ctx, baseURL, fmt.Sprintf(`group by (instance) (up{job="node_exporter",%s})`, target.Matcher), "instance")
+	if err != nil {
+		return GraphTarget{}, err
+	}
+	target.Hosts = uniqueMetricLabelValues(values, "instance")
+	if len(target.Hosts) > hostCap {
+		return GraphTarget{}, operatorCommandError{Message: fmt.Sprintf("Regex /%s/ matched %d hosts; narrow the regex to %d or fewer hosts.", target.Raw, len(target.Hosts), hostCap)}
+	}
+	return target, nil
+}
+
+func uniqueMetricLabelValues(values []MetricValue, label string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		item := strings.TrimSpace(value.Labels[label])
+		if item == "" {
+			item = strings.TrimSpace(value.Name)
+		}
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func graphQueries(command string, target GraphTarget, window GraphRange, top func(string, ...string) ([]MetricValue, error)) ([]graphRangeQuery, InstanceGraph, error) {
+	selector := target.Matcher
 	rateWindow := window.RateWindow
 	switch command {
 	case "/cpu":
+		if target.Regex {
+			return []graphRangeQuery{{
+				Query:     fmt.Sprintf(`100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{job="node_exporter",%s,mode="idle"}[%s])))`, selector, rateWindow),
+				NameLabel: "instance",
+			}}, InstanceGraph{Title: "CPU usage", Unit: graphUnitPercent}, nil
+		}
 		return []graphRangeQuery{{
-			Query:     fmt.Sprintf(`100 * (1 - avg(rate(node_cpu_seconds_total{job="node_exporter",instance=%s,mode="idle"}[%s])))`, selector, rateWindow),
+			Query:     fmt.Sprintf(`100 * (1 - avg(rate(node_cpu_seconds_total{job="node_exporter",%s,mode="idle"}[%s])))`, selector, rateWindow),
 			FixedName: "cpu used",
 		}}, InstanceGraph{Title: "CPU usage", Unit: graphUnitPercent}, nil
 	case "/mem":
+		nameLabel := ""
+		fixedName := "memory used"
+		if target.Regex {
+			nameLabel = "instance"
+			fixedName = ""
+		}
 		return []graphRangeQuery{{
-			Query:     fmt.Sprintf(`100 * (1 - (node_memory_MemAvailable_bytes{job="node_exporter",instance=%s} / node_memory_MemTotal_bytes{job="node_exporter",instance=%s}))`, selector, selector),
-			FixedName: "memory used",
+			Query:     fmt.Sprintf(`100 * (1 - (node_memory_MemAvailable_bytes{job="node_exporter",%s} / node_memory_MemTotal_bytes{job="node_exporter",%s}))`, selector, selector),
+			NameLabel: nameLabel,
+			FixedName: fixedName,
 		}}, InstanceGraph{Title: "Memory usage", Unit: graphUnitPercent}, nil
 	case "/la":
+		if target.Regex {
+			return []graphRangeQuery{{
+				Query:     fmt.Sprintf(`node_load5{job="node_exporter",%s}`, selector),
+				NameLabel: "instance",
+			}}, InstanceGraph{Title: "Load average", Unit: graphUnitLoad}, nil
+		}
 		return []graphRangeQuery{{
-			Query:     fmt.Sprintf(`{__name__=~"node_load1|node_load5|node_load15",job="node_exporter",instance=%s}`, selector),
+			Query:     fmt.Sprintf(`{__name__=~"node_load1|node_load5|node_load15",job="node_exporter",%s}`, selector),
 			NameLabel: "__name__",
 		}}, InstanceGraph{Title: "Load average", Unit: graphUnitLoad}, nil
 	case "/swap":
+		nameLabel := ""
+		fixedName := "swap used"
+		if target.Regex {
+			nameLabel = "instance"
+			fixedName = ""
+		}
 		return []graphRangeQuery{{
-			Query:     fmt.Sprintf(`100 * (1 - (node_memory_SwapFree_bytes{job="node_exporter",instance=%s} / node_memory_SwapTotal_bytes{job="node_exporter",instance=%s}))`, selector, selector),
-			FixedName: "swap used",
-		}}, InstanceGraph{Title: "Swap usage", Unit: graphUnitPercent, EmptyMessage: "No swap data for this instance/range."}, nil
+			Query:     fmt.Sprintf(`100 * (1 - (node_memory_SwapFree_bytes{job="node_exporter",%s} / node_memory_SwapTotal_bytes{job="node_exporter",%s}))`, selector, selector),
+			NameLabel: nameLabel,
+			FixedName: fixedName,
+		}}, InstanceGraph{Title: "Swap usage", Unit: graphUnitPercent, EmptyMessage: graphEmptyMessage("Swap usage", target, window)}, nil
 	case "/space":
-		query := fmt.Sprintf(`topk(3, 100 * (1 - (node_filesystem_avail_bytes{job="node_exporter",instance=%s,fstype!~"^(tmpfs|devtmpfs|overlay|squashfs|iso9660|fuse.lxcfs|nsfs|proc|sysfs|cgroup2?)$",mountpoint!~"^/(run|var/lib/docker|snap)($|/)"} / node_filesystem_size_bytes{job="node_exporter",instance=%s,fstype!~"^(tmpfs|devtmpfs|overlay|squashfs|iso9660|fuse.lxcfs|nsfs|proc|sysfs|cgroup2?)$",mountpoint!~"^/(run|var/lib/docker|snap)($|/)"})))`, selector, selector)
-		values, err := top(query, "mountpoint", "device")
+		limit := graphTopSeriesLimit(target)
+		query := fmt.Sprintf(`topk(%d, 100 * (1 - (node_filesystem_avail_bytes{job="node_exporter",%s,fstype!~"^(tmpfs|devtmpfs|overlay|squashfs|iso9660|fuse.lxcfs|nsfs|proc|sysfs|cgroup2?)$",mountpoint!~"^/(run|var/lib/docker|snap)($|/)"} / node_filesystem_size_bytes{job="node_exporter",%s,fstype!~"^(tmpfs|devtmpfs|overlay|squashfs|iso9660|fuse.lxcfs|nsfs|proc|sysfs|cgroup2?)$",mountpoint!~"^/(run|var/lib/docker|snap)($|/)"})))`, limit, selector, selector)
+		values, err := top(query, "mountpoint", "device", "instance")
 		if err != nil {
 			return nil, InstanceGraph{}, err
 		}
 		queries := make([]graphRangeQuery, 0, len(values))
-		for _, value := range limitMetricValues(values, 3) {
-			mountpoint := strconv.Quote(value.Name)
+		for _, value := range limitMetricValues(values, limit) {
+			instance := graphMetricInstance(target, value)
+			mountpointName := firstNonEmpty(value.Labels["mountpoint"], value.Name)
+			mountpoint := strconv.Quote(mountpointName)
 			queries = append(queries, graphRangeQuery{
-				Query:     fmt.Sprintf(`100 * (1 - (node_filesystem_avail_bytes{job="node_exporter",instance=%s,mountpoint=%s} / node_filesystem_size_bytes{job="node_exporter",instance=%s,mountpoint=%s}))`, selector, mountpoint, selector, mountpoint),
-				FixedName: value.Name,
+				Query:     fmt.Sprintf(`100 * (1 - (node_filesystem_avail_bytes{job="node_exporter",instance=%s,mountpoint=%s} / node_filesystem_size_bytes{job="node_exporter",instance=%s,mountpoint=%s}))`, strconv.Quote(instance), mountpoint, strconv.Quote(instance), mountpoint),
+				FixedName: graphMetricSeriesName(target, instance, mountpointName),
 			})
 		}
-		return queries, InstanceGraph{Title: "Filesystem usage", Unit: graphUnitPercent, EmptyMessage: "No filesystem data for this instance/range."}, nil
+		return queries, InstanceGraph{Title: "Filesystem usage", Unit: graphUnitPercent, EmptyMessage: graphEmptyMessage("Filesystem usage", target, window)}, nil
 	case "/io":
-		query := fmt.Sprintf(`topk(3, rate(node_disk_io_time_seconds_total{job="node_exporter",instance=%s,device!~"^(loop|ram|fd).*|^sr[0-9]+$"}[%s]) * 100)`, selector, rateWindow)
+		limit := graphTopSeriesLimit(target)
+		query := fmt.Sprintf(`topk(%d, rate(node_disk_io_time_seconds_total{job="node_exporter",%s,device!~"^(loop|ram|fd).*|^sr[0-9]+$"}[%s]) * 100)`, limit, selector, rateWindow)
 		values, err := top(query, "device")
 		if err != nil {
 			return nil, InstanceGraph{}, err
 		}
 		queries := make([]graphRangeQuery, 0, len(values))
-		for _, value := range limitMetricValues(values, 3) {
-			device := strconv.Quote(value.Name)
+		for _, value := range limitMetricValues(values, limit) {
+			instance := graphMetricInstance(target, value)
+			deviceName := firstNonEmpty(value.Labels["device"], value.Name)
+			device := strconv.Quote(deviceName)
 			queries = append(queries, graphRangeQuery{
-				Query:     fmt.Sprintf(`rate(node_disk_io_time_seconds_total{job="node_exporter",instance=%s,device=%s}[%s]) * 100`, selector, device, rateWindow),
-				FixedName: value.Name,
+				Query:     fmt.Sprintf(`rate(node_disk_io_time_seconds_total{job="node_exporter",instance=%s,device=%s}[%s]) * 100`, strconv.Quote(instance), device, rateWindow),
+				FixedName: graphMetricSeriesName(target, instance, deviceName),
 			})
 		}
-		return queries, InstanceGraph{Title: "Disk IO busy", Unit: graphUnitPercent, EmptyMessage: "No disk IO data for this instance/range."}, nil
+		return queries, InstanceGraph{Title: "Disk IO busy", Unit: graphUnitPercent, EmptyMessage: graphEmptyMessage("Disk IO busy", target, window)}, nil
 	case "/rx", "/tx":
 		metric := "node_network_receive_bytes_total"
 		title := "Network receive"
@@ -146,23 +273,75 @@ func graphQueries(command, instance string, window GraphRange, top func(string, 
 			metric = "node_network_transmit_bytes_total"
 			title = "Network transmit"
 		}
-		query := fmt.Sprintf(`topk(3, rate(%s{job="node_exporter",instance=%s,device!~"^(lo|docker.*|veth.*|br-.*|virbr.*)$"}[%s]) * 8)`, metric, selector, rateWindow)
+		limit := graphTopSeriesLimit(target)
+		query := fmt.Sprintf(`topk(%d, rate(%s{job="node_exporter",%s,device!~"^(lo|docker.*|veth.*|br-.*|virbr.*)$"}[%s]) * 8)`, limit, metric, selector, rateWindow)
 		values, err := top(query, "device")
 		if err != nil {
 			return nil, InstanceGraph{}, err
 		}
 		queries := make([]graphRangeQuery, 0, len(values))
-		for _, value := range limitMetricValues(values, 3) {
-			device := strconv.Quote(value.Name)
+		for _, value := range limitMetricValues(values, limit) {
+			instance := graphMetricInstance(target, value)
+			deviceName := firstNonEmpty(value.Labels["device"], value.Name)
+			device := strconv.Quote(deviceName)
 			queries = append(queries, graphRangeQuery{
-				Query:     fmt.Sprintf(`rate(%s{job="node_exporter",instance=%s,device=%s}[%s]) * 8`, metric, selector, device, rateWindow),
-				FixedName: value.Name,
+				Query:     fmt.Sprintf(`rate(%s{job="node_exporter",instance=%s,device=%s}[%s]) * 8`, metric, strconv.Quote(instance), device, rateWindow),
+				FixedName: graphMetricSeriesName(target, instance, deviceName),
 			})
 		}
-		return queries, InstanceGraph{Title: title, Unit: graphUnitBits, EmptyMessage: "No network data for this instance/range."}, nil
+		return queries, InstanceGraph{Title: title, Unit: graphUnitBits, EmptyMessage: graphEmptyMessage(title, target, window)}, nil
 	default:
 		return nil, InstanceGraph{}, fmt.Errorf("unsupported graph command %q", command)
 	}
+}
+
+func graphTopSeriesLimit(target GraphTarget) int {
+	if target.Regex {
+		return DefaultGraphRegexHostLimit
+	}
+	return 3
+}
+
+func graphMetricInstance(target GraphTarget, value MetricValue) string {
+	if instance := strings.TrimSpace(value.Labels["instance"]); instance != "" {
+		return instance
+	}
+	return target.Raw
+}
+
+func graphMetricSeriesName(target GraphTarget, instance, entity string) string {
+	entity = strings.TrimSpace(entity)
+	if entity == "" {
+		entity = "value"
+	}
+	if target.Regex {
+		instance = strings.TrimSpace(instance)
+		if instance == "" {
+			instance = target.Raw
+		}
+		return instance + " / " + entity
+	}
+	return entity
+}
+
+func graphEmptyMessage(title string, target GraphTarget, window GraphRange) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = "Graph"
+	}
+	if target.Regex {
+		return fmt.Sprintf("No %s data for /%s/ over %s (%d hosts).", strings.ToLower(title), target.Raw, window.Raw, len(target.Hosts))
+	}
+	return fmt.Sprintf("No %s data for %s over %s.", strings.ToLower(title), target.Raw, window.Raw)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func (c *AlertmanagerClient) queryRange(ctx context.Context, baseURL, query string, window GraphRange) ([]prometheusRangeSeries, error) {

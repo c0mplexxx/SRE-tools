@@ -67,12 +67,21 @@ type GraphRange struct {
 	End        time.Time
 }
 
+type GraphTarget struct {
+	Raw     string
+	Matcher string
+	Regex   bool
+	Hosts   []string
+	HostCap int
+}
+
 type InstanceGraph struct {
 	Tenant       string
 	Command      string
 	Title        string
 	Unit         string
 	Instance     string
+	Target       GraphTarget
 	Range        GraphRange
 	Series       []GraphSeries
 	EmptyMessage string
@@ -90,8 +99,9 @@ type GraphPoint struct {
 }
 
 type MetricValue struct {
-	Name  string
-	Value float64
+	Name   string
+	Value  float64
+	Labels map[string]string
 }
 
 type Chat struct {
