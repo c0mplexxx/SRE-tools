@@ -212,7 +212,7 @@ func graphQueries(command string, target GraphTarget, window GraphRange, top fun
 			return []graphRangeQuery{{
 				Query:     fmt.Sprintf(`node_load5{job="node_exporter",%s}`, selector),
 				NameLabel: "instance",
-			}}, InstanceGraph{Title: "Load average", Unit: graphUnitLoad}, nil
+			}}, InstanceGraph{Title: "Load average (load5)", Unit: graphUnitLoad}, nil
 		}
 		return []graphRangeQuery{{
 			Query:     fmt.Sprintf(`{__name__=~"node_load1|node_load5|node_load15",job="node_exporter",%s}`, selector),

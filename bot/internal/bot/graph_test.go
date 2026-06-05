@@ -157,6 +157,25 @@ func TestAlertmanagerClientGraphInstanceRegexQueryRange(t *testing.T) {
 	}
 }
 
+func TestGraphQueriesRegexLoadUsesLoad5Title(t *testing.T) {
+	t.Parallel()
+
+	target, err := parseGraphTarget("vminsert.*")
+	if err != nil {
+		t.Fatalf("parseGraphTarget returned error: %v", err)
+	}
+	queries, graph, err := graphQueries("/la", target, GraphRange{Raw: "1h", RateWindow: "1m"}, nil)
+	if err != nil {
+		t.Fatalf("graphQueries returned error: %v", err)
+	}
+	if len(queries) != 1 || !strings.Contains(queries[0].Query, "node_load5") || strings.Contains(queries[0].Query, "node_load1") || strings.Contains(queries[0].Query, "node_load15") {
+		t.Fatalf("regex /la query should only use node_load5: %#v", queries)
+	}
+	if graph.Title != "Load average (load5)" {
+		t.Fatalf("regex /la title=%q want load5-specific title", graph.Title)
+	}
+}
+
 func TestAlertmanagerClientGraphInstanceRegexHostCap(t *testing.T) {
 	t.Parallel()
 
